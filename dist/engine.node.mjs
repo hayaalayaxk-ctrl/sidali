@@ -3885,6 +3885,7 @@ print "norm product " + zd.normProduct
 print "pi node " + pi(2)`;
 
 // src/compiler/llvm.ts
+var SUBSTRATES = ["electron", "photon", "qubit", "fluidic", "vacuum", "holographic", "plasma", "energy", "generic"];
 var TARGETS = {
   "x86_64-linux": { name: "x86_64-linux", triple: "x86_64-unknown-linux-gnu", cpu: "", march: "", features: "", freestanding: false, ptrBits: 64 },
   "aarch64-linux": { name: "aarch64-linux", triple: "aarch64-unknown-linux-gnu", cpu: "", march: "", features: "", freestanding: false, ptrBits: 64 },
@@ -5148,19 +5149,493 @@ entry:
     }
   }
 };
+
+// src/ir/sair.ts
+var SairError = class extends Error {
+};
+var OP_ENERGY = {
+  const: 1,
+  load: 1,
+  store: 1,
+  add: 1,
+  sub: 1,
+  mul: 2,
+  div: 4,
+  mod: 4,
+  pow: 16,
+  eq: 1,
+  ne: 1,
+  lt: 1,
+  le: 1,
+  gt: 1,
+  ge: 1,
+  and: 1,
+  or: 1,
+  xor: 1,
+  shl: 1,
+  shr: 1,
+  neg: 1,
+  not: 1,
+  print: 8,
+  jump: 1,
+  branch: 1,
+  call: 4,
+  ret: 1,
+  range: 2,
+  transcend: 16,
+  sys: 2
+};
+var BINOP = {
+  "+": "add",
+  "-": "sub",
+  "*": "mul",
+  "/": "div",
+  "%": "mod",
+  "**": "pow",
+  "==": "eq",
+  "!=": "ne",
+  "<": "lt",
+  "<=": "le",
+  ">": "gt",
+  ">=": "ge",
+  "&&": "and",
+  "||": "or",
+  "&": "and",
+  "|": "or",
+  "^": "xor",
+  "<<": "shl",
+  ">>": "shr"
+};
+var UNOP = { "-": "neg", "!": "not", "~": "not" };
+function typeOfValue(v) {
+  if (typeof v === "number") return Number.isInteger(v) ? "i64" : "f64";
+  if (typeof v === "boolean") return "bool";
+  if (typeof v === "string") return "str";
+  return "any";
+}
+function lowerChunk(chunk, id, chunkNames) {
+  const states = [];
+  const transitions = [];
+  const stack = [];
+  const names = /* @__PURE__ */ new Map();
+  let next = 0;
+  const newState = (type, name) => {
+    const s = { id: next++, type, name };
+    states.push(s);
+    return s.id;
+  };
+  const emit = (t) => {
+    const full = { ...t, energy: t.energy ?? OP_ENERGY[t.op] };
+    transitions.push(full);
+    return transitions.length - 1;
+  };
+  const pop = () => {
+    const v = stack.pop();
+    if (v === void 0) throw new SairError(`stack underflow in ${chunk.name}`);
+    return v;
+  };
+  for (const ins of chunk.code) {
+    const line = ins.line;
+    switch (ins.op) {
+      case "CONST": {
+        const s = newState(typeOfValue(ins.a), "const");
+        emit({ op: "const", dst: s, srcs: [], imm: ins.a, line });
+        stack.push(s);
+        break;
+      }
+      case "LOAD": {
+        const s = newState("any", String(ins.a));
+        names.set(s, String(ins.a));
+        emit({ op: "load", dst: s, srcs: [], imm: ins.a, line });
+        stack.push(s);
+        break;
+      }
+      case "STORE":
+      case "DECLARE":
+      case "DECLARE_CONST": {
+        emit({ op: "store", srcs: [pop()], imm: ins.a, line });
+        break;
+      }
+      case "POP":
+        pop();
+        break;
+      case "MAKE_FN": {
+        const s = newState("any", "fn");
+        names.set(s, chunkNames.get(Number(ins.a)) || `fn#${ins.a}`);
+        emit({ op: "const", dst: s, srcs: [], imm: { fn: ins.a }, line });
+        stack.push(s);
+        break;
+      }
+      case "BINOP": {
+        const b = pop(), a = pop();
+        const op = BINOP[String(ins.a)];
+        if (!op) throw new SairError(`unsupported binary op ${ins.a}`);
+        const s = newState("any", "binop");
+        emit({ op, dst: s, srcs: [a, b], imm: ins.a, line });
+        stack.push(s);
+        break;
+      }
+      case "UNOP": {
+        const a = pop();
+        const op = UNOP[String(ins.a)];
+        if (!op) throw new SairError(`unsupported unary op ${ins.a}`);
+        const s = newState("any", "unop");
+        emit({ op, dst: s, srcs: [a], imm: ins.a, line });
+        stack.push(s);
+        break;
+      }
+      case "PRINT":
+        emit({ op: "print", srcs: [pop()], line });
+        break;
+      case "JZ":
+        emit({ op: "branch", srcs: [pop()], imm: ins.a, line });
+        break;
+      case "JUMP":
+        emit({ op: "jump", srcs: [], imm: ins.a, line });
+        break;
+      case "CALL": {
+        const argc = Number(ins.a) || 0;
+        const args = [];
+        for (let i = 0; i < argc; i++) args.unshift(pop());
+        const callee = stack.pop();
+        const calleeName = callee === void 0 ? "" : names.get(callee) || "";
+        const s = newState("any", "call");
+        emit({ op: "call", dst: s, srcs: args, imm: calleeName, line });
+        stack.push(s);
+        break;
+      }
+      case "RET": {
+        const srcs = stack.length ? [pop()] : [];
+        emit({ op: "ret", srcs, line });
+        break;
+      }
+      case "MAKE_RANGE": {
+        const end = pop(), start = pop();
+        const s = newState("any", "range");
+        emit({ op: "range", dst: s, srcs: [start, end], imm: !!ins.a, line });
+        stack.push(s);
+        break;
+      }
+      case "TRANSCEND": {
+        const s = newState("f64", String(ins.a));
+        emit({ op: "transcend", dst: s, srcs: [], imm: { symbol: ins.a, kind: ins.b }, line });
+        stack.push(s);
+        break;
+      }
+      default: {
+        emit({ op: "sys", srcs: [], imm: { bytecode: ins.op, a: ins.a, b: ins.b }, line });
+        break;
+      }
+    }
+  }
+  return { id, name: chunk.name, params: chunk.params, states, transitions };
+}
+function lowerBytecode(result, source = "") {
+  const chunkNames = /* @__PURE__ */ new Map();
+  result.chunks.forEach((c) => chunkNames.set(c.id, c.name));
+  const functions = result.chunks.map((c, i) => lowerChunk(c, i, chunkNames));
+  const main = result.chunks.indexOf(result.main);
+  return { functions, main, meta: summarize(functions, source) };
+}
+function lowerSource(src, compile2, parse2, tokenize2) {
+  return lowerBytecode(compile2(parse2(tokenize2(src))), src);
+}
+function summarize(functions, source) {
+  let states = 0, transitions = 0, energy = 0;
+  for (const f of functions) {
+    states += f.states.length;
+    transitions += f.transitions.length;
+    for (const t of f.transitions) energy += t.energy;
+  }
+  return { source, states, transitions, energy };
+}
+function energyOf(program) {
+  return program.meta.energy;
+}
+function evaluate(program, substrate, maxSteps = 5e6) {
+  const byName = /* @__PURE__ */ new Map();
+  for (const f of program.functions) byName.set(f.name, f);
+  const output = [];
+  let energy = 0;
+  let steps = 0;
+  const run = (fn, args) => {
+    const env = /* @__PURE__ */ new Map();
+    fn.params.forEach((p, i) => env.set(p, args[i]));
+    const frames = [{ fn, env, pc: 0 }];
+    let last = null;
+    while (frames.length) {
+      const fr = frames[frames.length - 1];
+      if (fr.pc < 0 || fr.pc >= fr.fn.transitions.length) {
+        const v = fr.ret !== void 0 ? fr.ret : last;
+        const dstId = fr.dst;
+        frames.pop();
+        if (frames.length) {
+          const parent = frames[frames.length - 1];
+          if (dstId !== void 0) parent.env.set(String(dstId), v);
+        }
+        last = v;
+        continue;
+      }
+      if (++steps > maxSteps) throw new SairError("step limit exceeded");
+      const t = fr.fn.transitions[fr.pc];
+      energy += substrate.energy(t.op, t.energy);
+      const val = (id) => id === void 0 ? 0 : fr.env.get(String(id));
+      const num = (id) => {
+        const v = val(id);
+        return typeof v === "number" ? v : Number(v ?? 0);
+      };
+      const bool = (id) => !!val(id);
+      const set = (id, v) => {
+        if (id !== void 0) fr.env.set(String(id), v);
+      };
+      switch (t.op) {
+        case "const":
+          set(t.dst, t.imm);
+          break;
+        case "load":
+          set(t.dst, fr.env.get(String(t.imm)));
+          break;
+        case "store":
+          fr.env.set(String(t.imm), val(t.srcs[0]));
+          break;
+        case "add":
+        case "sub":
+        case "mul":
+        case "div":
+        case "mod":
+        case "pow":
+        case "eq":
+        case "ne":
+        case "lt":
+        case "le":
+        case "gt":
+        case "ge":
+        case "and":
+        case "or":
+        case "xor":
+        case "shl":
+        case "shr":
+          set(t.dst, substrate.compute(t.op, t.srcs.map(num), t.imm));
+          break;
+        case "neg":
+          set(t.dst, substrate.compute("neg", [num(t.srcs[0])], t.imm));
+          break;
+        case "not":
+          set(t.dst, substrate.compute("not", [num(t.srcs[0])], t.imm));
+          break;
+        case "print":
+          output.push(String(val(t.srcs[0])));
+          break;
+        case "jump":
+          fr.pc = Number(t.imm);
+          continue;
+        case "branch":
+          fr.pc = bool(t.srcs[0]) ? fr.pc + 1 : Number(t.imm);
+          continue;
+        case "range":
+          set(t.dst, { start: num(t.srcs[0]), end: num(t.srcs[1]), inclusive: !!t.imm });
+          break;
+        case "transcend": {
+          const imm = t.imm;
+          set(t.dst, imm.symbol === "e" ? Math.E : Math.PI);
+          break;
+        }
+        case "call": {
+          const target = byName.get(String(t.imm));
+          if (target) {
+            const callArgs = t.srcs.map(val);
+            fr.pc++;
+            frames.push({ fn: target, env: /* @__PURE__ */ new Map(), pc: 0, dst: t.dst });
+            const callee = frames[frames.length - 1];
+            target.params.forEach((p, i) => callee.env.set(p, callArgs[i]));
+            continue;
+          }
+          set(t.dst, 0);
+          break;
+        }
+        case "ret":
+          fr.ret = val(t.srcs[0]);
+          fr.pc = fr.fn.transitions.length;
+          continue;
+        case "sys":
+          break;
+      }
+      fr.pc++;
+    }
+    return last;
+  };
+  run(program.functions[program.main], []);
+  return { output, states: /* @__PURE__ */ new Map(), energy, substrate: substrate.name };
+}
+
+// src/backends/backend.ts
+var ClangBackend = class {
+  constructor(targetName) {
+    const t = TARGETS[targetName];
+    if (!t) throw new Error(`unknown target: ${targetName}`);
+    this.name = targetName;
+    this.substrate = t.substrate || "electron";
+    this.triple = t.triple;
+    this.objectOnly = !!t.objectOnly;
+  }
+  emit(ir) {
+    const bytes = new TextEncoder().encode(JSON.stringify(ir.meta));
+    return { bytes, substrate: this.substrate, arch: this.triple, dna: "" };
+  }
+};
+var ElectronSubstrate = class {
+  constructor() {
+    this.name = "electron";
+  }
+  compute(op, a, imm) {
+    switch (op) {
+      case "add":
+        return a[0] + a[1];
+      case "sub":
+        return a[0] - a[1];
+      case "mul":
+        return a[0] * a[1];
+      case "div":
+        return a[1] === 0 ? 0 : a[0] / a[1];
+      case "mod":
+        return a[1] === 0 ? 0 : a[0] % a[1];
+      case "pow":
+        return a[0] ** a[1];
+      case "eq":
+        return a[0] === a[1] ? 1 : 0;
+      case "ne":
+        return a[0] !== a[1] ? 1 : 0;
+      case "lt":
+        return a[0] < a[1] ? 1 : 0;
+      case "le":
+        return a[0] <= a[1] ? 1 : 0;
+      case "gt":
+        return a[0] > a[1] ? 1 : 0;
+      case "ge":
+        return a[0] >= a[1] ? 1 : 0;
+      case "and":
+        return a[0] && a[1] ? 1 : 0;
+      case "or":
+        return a[0] || a[1] ? 1 : 0;
+      case "xor":
+        return (a[0] ? 1 : 0) ^ (a[1] ? 1 : 0);
+      case "shl":
+        return a[0] << a[1];
+      case "shr":
+        return a[0] >> a[1];
+      case "neg":
+        return -a[0];
+      case "not":
+        return a[0] ? 0 : 1;
+      default:
+        return 0;
+    }
+  }
+  energy(_op, base) {
+    return base;
+  }
+};
+var PhysicsSubstrate = class {
+  constructor(name, energyFactor) {
+    this.name = name;
+    this.factor = energyFactor;
+    this.reference = new ElectronSubstrate();
+  }
+  compute(op, a, imm) {
+    return this.reference.compute(op, a, imm);
+  }
+  energy(_op, base) {
+    return Math.ceil(base * this.factor);
+  }
+};
+var SUBSTRATE_ENERGY = {
+  electron: 1,
+  photon: 0.5,
+  // light: lower switching energy
+  qubit: 0.25,
+  // superposition: fewer transitions
+  fluidic: 4,
+  // water valves: higher actuation cost
+  vacuum: 6,
+  // space: hard-vacuum switching
+  holographic: 3,
+  // voxel addressing
+  plasma: 8,
+  // fire/arc: high energy
+  energy: 0.1,
+  // energy-as-medium: near-lossless
+  generic: 1
+};
+function makeSubstrate(name) {
+  if (name === "electron") return new ElectronSubstrate();
+  return new PhysicsSubstrate(name, SUBSTRATE_ENERGY[name] ?? 1);
+}
+var ELECTRON_TARGETS = ["armv7m-none-eabi", "cortex-m4", "riscv32-none-elf", "riscv64-none-elf", "wasm32", "bpfel"];
+var NEW_SUBSTRATE_TARGETS = ["photon-riscv", "qubit-riscv", "fluidic-riscv", "vacuum-riscv", "holographic-wasm", "plasma-arm", "energy-riscv"];
+var BackendRegistry = class {
+  constructor() {
+    this.backends = /* @__PURE__ */ new Map();
+    this.substrates = /* @__PURE__ */ new Map();
+  }
+  register(b) {
+    this.backends.set(b.name, b);
+  }
+  registerSubstrate(s) {
+    this.substrates.set(s.name, s);
+  }
+  get(name) {
+    return this.backends.get(name);
+  }
+  substrate(name) {
+    return this.substrates.get(name);
+  }
+  list() {
+    return [...this.backends.values()];
+  }
+  listSubstrates() {
+    return [...this.substrates.values()];
+  }
+  bySubstrate(substrate) {
+    return this.list().filter((b) => b.substrate === substrate);
+  }
+};
+function defaultRegistry() {
+  const reg = new BackendRegistry();
+  for (const name of [...ELECTRON_TARGETS, ...NEW_SUBSTRATE_TARGETS]) {
+    reg.register(new ClangBackend(name));
+  }
+  for (const name of Object.keys(SUBSTRATE_ENERGY)) {
+    reg.registerSubstrate(makeSubstrate(name));
+  }
+  return reg;
+}
+function totalEnergy(ir, substrate) {
+  let e = 0;
+  for (const f of ir.functions) for (const t of f.transitions) e += substrate.energy(t.op, t.energy || OP_ENERGY[t.op]);
+  return e;
+}
 export {
   ACEEnvelope,
+  BackendRegistry,
   CRDT,
+  ClangBackend,
   Q as DILITHIUM_Q,
   DIM,
+  ELECTRON_TARGETS,
+  ElectronSubstrate,
   GOLDILOCKS_P,
   GraphemeDecomposer,
   Interpreter,
   K_MAX,
   Ledger,
   Machine,
+  NEW_SUBSTRATE_TARGETS,
+  OP_ENERGY,
+  PhysicsSubstrate,
   RAM_SIZE,
   RuntimeError,
+  SUBSTRATES,
+  SUBSTRATE_ENERGY,
   TARGETS,
   TAU_R,
   alpPolicy,
@@ -5169,12 +5644,15 @@ export {
   blake3,
   blake3Bytes,
   compile,
+  defaultRegistry,
   detectZeroDivisor,
   keygen as dilithiumKeygen,
   polyMul as dilithiumPolyMul,
   sign as dilithiumSign,
   verify as dilithiumVerify,
   emitLlvm,
+  energyOf,
+  evaluate,
   executeOpcode,
   fermatCertify,
   fermatTest,
@@ -5192,6 +5670,9 @@ export {
   jInvariant,
   kaniVerify,
   leanProve,
+  lowerBytecode,
+  lowerSource,
+  makeSubstrate,
   modPowNum,
   opcodeTable,
   parse,
@@ -5207,6 +5688,7 @@ export {
   toStr,
   toZeroWidth,
   tokenize,
+  totalEnergy,
   utf8Encode,
   zeroDivisorVault,
   zeta,

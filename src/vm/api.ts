@@ -23,5 +23,13 @@ export type { DecomposeResult, AlpPolicyState } from '../compiler/translator';
 export { tokenize } from '../compiler/lexer';
 export { parse } from '../compiler/parser';
 export { compile } from '../compiler/bytecode';
-export { emitLlvm, TARGETS } from '../compiler/llvm';
+export { emitLlvm, TARGETS, SUBSTRATES } from '../compiler/llvm';
 export type { TargetProfile } from '../compiler/llvm';
+export { lowerBytecode, lowerSource, evaluate, energyOf, OP_ENERGY } from '../ir/sair';
+export type { SairProgram, SairTransition, SairState, SairOp, EvalResult, SubstrateLike } from '../ir/sair';
+export {
+  ClangBackend, ElectronSubstrate, PhysicsSubstrate, BackendRegistry,
+  defaultRegistry, makeSubstrate, totalEnergy, SUBSTRATE_ENERGY,
+  ELECTRON_TARGETS, NEW_SUBSTRATE_TARGETS,
+} from '../backends/backend';
+export type { Backend, Binary } from '../backends/backend';

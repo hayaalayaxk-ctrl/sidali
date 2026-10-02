@@ -67,3 +67,16 @@ npm run sidac -- build hello.sidali --target=wasm32 --emit=obj
 - `bin/sidac.mjs` — `--emit=fat`, `--substrate=`, `dna`, `substrates`; loads engine from `SIDALI_ENGINE`/`SIDALI_NATIVE` or `../dist`.
 - `dist-build.mjs` → `dist/` (standalone `sidac`, `sidac.wasm`, engine bundles, `install.sh`). `dist/` is committed so the raw install URL resolves.
 - Tests 54. Typecheck clean. Push blocked: token lacks CreateRepository/push for hayaalayaxk-ctrl.
+
+## STEP 2 Phase 1 — SAIR + universal Backend/Substrate traits
+
+- `src/ir/sair.ts` — SAIR: only State + Transition + Energy. `lowerBytecode` lowers
+  the VM chunks (name-keyed states, calls resolved by name); `evaluate` runs SAIR on
+  any substrate. Correct on recursion/calls (fib(10)=55).
+- `src/backends/backend.ts` — `Backend` + `Substrate` traits. `ClangBackend` reuses
+  the LLVM pipeline for 13 targets; `ElectronSubstrate` is exact IEEE-754, and
+  `PhysicsSubstrate` gives photon/qubit/fluidic/vacuum/holographic/plasma/energy an
+  energy model while keeping identical results. `defaultRegistry()` = 13 backends,
+  9 substrates.
+- `src/vm/api.ts` exports the IR + backend surface.
+- Tests: 59 (added `test/sair.test.mjs`). Typecheck clean.
