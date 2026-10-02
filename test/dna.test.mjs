@@ -62,3 +62,10 @@ test('fat binary bundles many substrates into one .sda', { skip: !hasClang }, ()
   // every section records a BLAKE3
   assert.match(text, /LEN=\d+:BLAKE3=[0-9a-f]{64}\]/);
 });
+
+test('fat build does not double the .sda extension', { skip: !hasClang }, () => {
+  const r = buildFat(SRC, { outDir: out, outName: 'already.sda' });
+  assert.ok(r.ok, r.stderr);
+  assert.ok(r.artifact.endsWith('already.sda'), r.artifact);
+  assert.ok(!r.artifact.endsWith('.sda.sda'), r.artifact);
+});

@@ -13,7 +13,7 @@
 // Flags for build: --target=<name> --substrate=<name> --emit=<exe|obj|asm|ir|fat> -O0..3 --out=<name>
 
 import { readFileSync, existsSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // Locate a bundle: SIDALI_ENGINE/SIDALI_NATIVE env vars win (standalone install),
@@ -112,11 +112,14 @@ switch (cmd) {
   case 'build': {
     const file = positional[0];
     if (!file) { usage(); process.exit(1); }
-    const outName = flags.out || basename(file, '.sidali');
+    // --out may be a bare name or a path; a path sets both directory and name.
+    const outArg = flags.out || basename(file, '.sidali');
+    const outName = basename(outArg);
+    const outDir = flags.out && dirname(outArg) !== '.' ? dirname(outArg) : '.sidali-build';
     const emit = flags.emit || 'exe';
     const r = emit === 'fat'
-      ? buildFat(readSource(file), { optLevel: opt, outDir: '.sidali-build', outName })
-      : buildNative(readSource(file), { target, emit, optLevel: opt, outDir: '.sidali-build', outName });
+      ? buildFat(readSource(file), { optLevel: opt, outDir, outName })
+      : buildNative(readSource(file), { target, emit, optLevel: opt, outDir, outName });
     if (!r.ok) {
       console.error(`${C.red}compile failed${C.reset} (target ${target})`);
       for (const s of r.stages) console.error(`  ${s.ok ? C.green + 'ok' : C.red + 'FAIL'}${C.reset} ${s.name}: ${s.detail}`);

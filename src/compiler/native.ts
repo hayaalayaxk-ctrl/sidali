@@ -196,7 +196,7 @@ export function buildFat(source: string, opts: BuildOptions = {}): BuildResult {
   let pos = manifestBytes.length;
   for (const p of payloads) { out.set(p.bytes, pos); pos += p.bytes.length; }
 
-  const artifact = join(outDir, `${outName}.sda`);
+  const artifact = join(outDir, outName.endsWith('.sda') ? outName : `${outName}.sda`);
   writeFileSync(artifact, out);
   stages.push({ name: 'fat', ok: true, detail: `${payloads.length} substrates, ${total} bytes` });
   return { ok: true, artifact, target: TARGETS['x86_64-linux'], stdout: '', stderr: '', stages };
