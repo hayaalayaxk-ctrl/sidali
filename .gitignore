@@ -1,7 +1,8 @@
 node_modules/
-dist/
+# dist/ is committed so the raw install URL works
 dist-site/
 *.log
 .DS_Store
+dist/.engine.wasm.mjs
 dist-native/
 .sidali-build/

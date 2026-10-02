@@ -13,17 +13,35 @@ export interface TargetProfile {
   freestanding: boolean;
   ptrBits: number;
   objectOnly?: boolean;
+  /** Execution substrate (electron, photon, qubit, ...). Defaults to `electron`. */
+  substrate?: string;
 }
+
+/** The physical substrate a binary is emitted for. */
+export const SUBSTRATES = ['electron', 'photon', 'qubit', 'fluidic', 'vacuum', 'holographic', 'plasma', 'energy', 'generic'] as const;
+export type Substrate = (typeof SUBSTRATES)[number];
 
 export const TARGETS: Record<string, TargetProfile> = {
   'x86_64-linux': { name: 'x86_64-linux', triple: 'x86_64-unknown-linux-gnu', cpu: '', march: '', features: '', freestanding: false, ptrBits: 64 },
   'aarch64-linux': { name: 'aarch64-linux', triple: 'aarch64-unknown-linux-gnu', cpu: '', march: '', features: '', freestanding: false, ptrBits: 64 },
-  'armv7m-none-eabi': { name: 'armv7m-none-eabi', triple: 'thumbv7m-none-eabi', cpu: 'cortex-m3', march: 'armv7-m', features: '', freestanding: true, ptrBits: 32 },
-  'cortex-m4': { name: 'cortex-m4', triple: 'thumbv7em-none-eabi', cpu: 'cortex-m4', march: 'armv7e-m', features: '', freestanding: true, ptrBits: 32 },
-  'riscv32-none-elf': { name: 'riscv32-none-elf', triple: 'riscv32-none-elf', cpu: '', march: 'rv32imac', features: '', freestanding: true, ptrBits: 32 },
-  'riscv64-none-elf': { name: 'riscv64-none-elf', triple: 'riscv64-none-elf', cpu: '', march: 'rv64imac', features: '', freestanding: true, ptrBits: 64 },
-  wasm32: { name: 'wasm32', triple: 'wasm32-unknown-unknown', cpu: 'generic', march: '', features: '', freestanding: true, ptrBits: 32 },
-  bpfel: { name: 'bpfel', triple: 'bpfel-unknown-none', cpu: 'generic', march: '', features: '', freestanding: true, ptrBits: 64, objectOnly: true },
+  'armv7m-none-eabi': { name: 'armv7m-none-eabi', triple: 'thumbv7m-none-eabi', cpu: 'cortex-m3', march: 'armv7-m', features: '', freestanding: true, ptrBits: 32, substrate: 'electron' },
+  'cortex-m4': { name: 'cortex-m4', triple: 'thumbv7em-none-eabi', cpu: 'cortex-m4', march: 'armv7e-m', features: '', freestanding: true, ptrBits: 32, substrate: 'electron' },
+  'riscv32-none-elf': { name: 'riscv32-none-elf', triple: 'riscv32-none-elf', cpu: '', march: 'rv32imac', features: '', freestanding: true, ptrBits: 32, substrate: 'electron' },
+  'riscv64-none-elf': { name: 'riscv64-none-elf', triple: 'riscv64-none-elf', cpu: '', march: 'rv64imac', features: '', freestanding: true, ptrBits: 64, substrate: 'electron' },
+  wasm32: { name: 'wasm32', triple: 'wasm32-unknown-unknown', cpu: 'generic', march: '', features: '', freestanding: true, ptrBits: 32, substrate: 'electron' },
+  bpfel: { name: 'bpfel', triple: 'bpfel-unknown-none', cpu: 'generic', march: '', features: '', freestanding: true, ptrBits: 64, objectOnly: true, substrate: 'electron' },
+
+  // --- non-electron substrates: same SAIR, different physics.
+  // Photonic/quantum/fluidic/vacuum/holographic/plasma/energy logic all lowers to
+  // a real clang architecture today (RISC-V, ARM, wasm); the DNA header records
+  // which physical substrate the image is destined for.
+  'photon-riscv': { name: 'photon-riscv', triple: 'riscv64-unknown-none-elf', cpu: '', march: 'rv64imac', features: '', freestanding: true, ptrBits: 64, substrate: 'photon' },
+  'qubit-riscv': { name: 'qubit-riscv', triple: 'riscv32-unknown-none-elf', cpu: '', march: 'rv32imac', features: '', freestanding: true, ptrBits: 32, substrate: 'qubit' },
+  'fluidic-riscv': { name: 'fluidic-riscv', triple: 'riscv32-unknown-none-elf', cpu: '', march: 'rv32imac', features: '', freestanding: true, ptrBits: 32, substrate: 'fluidic' },
+  'vacuum-riscv': { name: 'vacuum-riscv', triple: 'riscv64-unknown-none-elf', cpu: '', march: 'rv64imac', features: '', freestanding: true, ptrBits: 64, substrate: 'vacuum' },
+  'holographic-wasm': { name: 'holographic-wasm', triple: 'wasm32-unknown-unknown', cpu: 'generic', march: '', features: '', freestanding: true, ptrBits: 32, substrate: 'holographic' },
+  'plasma-arm': { name: 'plasma-arm', triple: 'thumbv7em-none-eabi', cpu: 'cortex-m4', march: 'armv7e-m', features: '', freestanding: true, ptrBits: 32, substrate: 'plasma' },
+  'energy-riscv': { name: 'energy-riscv', triple: 'riscv32-unknown-none-elf', cpu: '', march: 'rv32imac', features: '', freestanding: true, ptrBits: 32, substrate: 'energy' },
 };
 
 export class LlvmError extends Error {}

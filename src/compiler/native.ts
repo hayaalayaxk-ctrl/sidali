@@ -2,23 +2,44 @@
 // Node-only (child_process). Used by the sidac CLI; the browser playground keeps using the VM.
 
 import { spawnSync } from 'node:child_process';
-import { writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import * as A from './parser';
 import { parse } from './parser';
-import { emitLlvm, TARGETS, TargetProfile } from './llvm';
+import { emitLlvm, TARGETS, TargetProfile, SUBSTRATES } from './llvm';
+import { buildDnaHeader, formatDnaHeader, withDnaHeader, readDnaHeader, verifyDna, DNA_END } from './dna';
+import { blake3Bytes, hex } from '../std/blake3';
 
-export { TARGETS };
-export type { TargetProfile };
+export { TARGETS, SUBSTRATES };
+export type { TargetProfile, Substrate } from './llvm';
+export { withDnaHeader, readDnaHeader, readDnaTrailer, findDna, stripDna, verifyDna, buildDnaHeader, formatDnaHeader, DNA_START, DNA_END } from './dna';
+export type { DnaHeader } from './dna';
+
+/** Fat-binary components: one SidAli source, many substrates in one file. */
+export const FAT_SUBSTRATES = [
+  'x86_64-linux',
+  'aarch64-linux',
+  'riscv64-none-elf',
+  'wasm32',
+  'photon-riscv',
+  'qubit-riscv',
+  'fluidic-riscv',
+  'vacuum-riscv',
+  'holographic-wasm',
+  'plasma-arm',
+  'energy-riscv',
+] as const;
 
 export interface BuildOptions {
   target?: string;
   outDir?: string;
   outName?: string;
   optLevel?: number;
-  emit?: 'exe' | 'obj' | 'ir' | 'asm' | 'wasm';
+  emit?: 'exe' | 'obj' | 'ir' | 'asm' | 'wasm' | 'fat';
   entry?: string;
   keepTemps?: boolean;
+  /** Skip the DNA header (raw machine code only). */
+  noDna?: boolean;
 }
 
 export interface BuildResult {
@@ -143,7 +164,74 @@ export function buildNative(source: string, opts: BuildOptions = {}): BuildResul
   stages.push({ name: 'clang', ok, detail: ok ? `clang ${args.join(' ')}` : (res.stderr || '').slice(0, 400) });
   if (!ok) return { ok: false, target, stdout: res.stdout || '', stderr: res.stderr || '', stages, ir };
 
-  return { ok: true, artifact: args[args.indexOf('-o') + 1], ir, target, stdout: res.stdout || '', stderr: res.stderr || '', stages };
+  const artifact = args[args.indexOf('-o') + 1];
+  const substrate = target.substrate || 'electron';
+
+  // An ELF/object keeps its magic at byte 0 so the OS loader still runs it, so the
+  // DNA header is appended as a trailer (plus a companion `.dna` for tooling).
+  // `emit=fat` instead writes one self-describing `.sda` container (see buildFat).
+  if (!opts.noDna) {
+    const bytes = readFileSync(artifact);
+    const header = formatDnaHeader(buildDnaHeader(substrate, target.triple, bytes));
+    writeFileSync(artifact, Buffer.concat([bytes, Buffer.from('\n' + header + DNA_END + '\n')]));
+    writeFileSync(`${artifact}.dna`, header + DNA_END + '\n');
+  }
+
+  return { ok: true, artifact, ir, target, stdout: res.stdout || '', stderr: res.stderr || '', stages };
+}
+
+/**
+ * Build a fat (universal) SidAli image: one source, every substrate in one `.sda`
+ * file. The container is a DNA manifest followed by concatenated payloads; a
+ * loader reads the manifest, verifies BLAKE3, and picks the section matching the
+ * host (CPUID / QPUID / PhotonicID). Sections that fail to compile are skipped.
+ */
+export function buildFat(source: string, opts: BuildOptions = {}): BuildResult {
+  const stages: Array<{ name: string; ok: boolean; detail: string }> = [];
+  const outDir = opts.outDir || join(process.cwd(), 'dist-native');
+  mkdirSync(outDir, { recursive: true });
+  const outName = opts.outName || 'a';
+  const targets = (opts.target ? [opts.target] : [...FAT_SUBSTRATES]) as string[];
+
+  const payloads: Array<{ target: TargetProfile; bytes: Buffer }> = [];
+  const tmpDir = join(outDir, `.fat-${outName}`);
+  mkdirSync(tmpDir, { recursive: true });
+  for (const t of targets) {
+    if (!TARGETS[t]) { stages.push({ name: `target:${t}`, ok: false, detail: 'unknown target' }); continue; }
+    const r = buildNative(source, { ...opts, target: t, outDir: tmpDir, outName: `part-${t}`, emit: 'obj', noDna: true });
+    if (r.ok && r.artifact && existsSync(r.artifact)) {
+      payloads.push({ target: TARGETS[t], bytes: readFileSync(r.artifact) });
+      stages.push({ name: `target:${t}`, ok: true, detail: `${readFileSync(r.artifact).length} bytes` });
+    } else {
+      stages.push({ name: `target:${t}`, ok: false, detail: (r.stderr || 'compile failed').slice(0, 120) });
+    }
+  }
+  rmSync(tmpDir, { recursive: true, force: true });
+
+  if (!payloads.length) {
+    return { ok: false, target: TARGETS['x86_64-linux'], stdout: '', stderr: 'no substrate compiled', stages };
+  }
+
+  const manifest: string[] = [`[SIDALI-FAT:VERSION=1:SECTIONS=${payloads.length}]`];
+  let offset = 0;
+  for (const p of payloads) {
+    const substrate = p.target.substrate || 'electron';
+    const blake = hex(blake3Bytes(new Uint8Array(p.bytes)));
+    manifest.push(`[SUBSTRATE=${substrate}:ARCH=${p.target.triple}:OFFSET=${offset}:LEN=${p.bytes.length}:BLAKE3=${blake}]`);
+    offset += p.bytes.length;
+  }
+  manifest.push(DNA_END);
+  const manifestBytes = new TextEncoder().encode(manifest.join('\n') + '\n');
+  const total = manifestBytes.length + offset;
+  const out = Buffer.alloc(total);
+  out.set(manifestBytes, 0);
+  let pos = manifestBytes.length;
+  for (const p of payloads) { out.set(p.bytes, pos); pos += p.bytes.length; }
+
+  const artifact = join(outDir, `${outName}.sda`);
+  writeFileSync(artifact, out);
+  stages.push({ name: 'fat', ok: true, detail: `${payloads.length} substrates, ${total} bytes` });
+  return { ok: true, artifact, target: TARGETS['x86_64-linux'], stdout: '', stderr: '', stages };
 }
 
 export function runNative(binary: string, timeoutMs = 5000): { stdout: string; stderr: string; status: number } {

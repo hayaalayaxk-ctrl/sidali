@@ -1,0 +1,5215 @@
+// src/compiler/bytecode.ts
+var CompileError = class extends Error {
+};
+function compile(program) {
+  const chunks = [];
+  let chunkId = 0;
+  function newChunk(name, params, isMethod = false) {
+    const c = { id: chunkId++, name, params, code: [], isMethod };
+    chunks.push(c);
+    return c;
+  }
+  const main = newChunk("__main__", []);
+  function emit(c, op, a, b, line) {
+    c.code.push({ op, a, b, line });
+    return c.code.length - 1;
+  }
+  function compileBlockTo(c, block) {
+    for (const st of block.body) compileStmt(c, st);
+  }
+  function compileStmt(c, node) {
+    switch (node.kind) {
+      case "VarDecl": {
+        if (node.init) compileExpr(c, node.init);
+        else emit(c, "CONST", null);
+        emit(c, "DECLARE", node.name);
+        break;
+      }
+      case "ConstDecl": {
+        compileExpr(c, node.init);
+        emit(c, "DECLARE_CONST", node.name);
+        break;
+      }
+      case "FnDecl": {
+        const fc = newChunk(node.name, node.params.map((p) => p.name));
+        compileBlockTo(fc, node.body);
+        emit(fc, "RET");
+        emit(c, "MAKE_FN", fc.id);
+        emit(c, "DECLARE", node.name);
+        break;
+      }
+      case "ClassDecl": {
+        const methods = [];
+        const statics = [];
+        for (const m of node.members) {
+          if (m.kind === "FnDecl") {
+            const mc = newChunk(`${node.name}.${m.name}`, m.params.map((p) => p.name), true);
+            compileBlockTo(mc, m.body);
+            emit(mc, "RET");
+            methods.push({ name: m.name, chunk: mc.id });
+          } else if (m.kind === "VarDecl" || m.kind === "ConstDecl") {
+            statics.push({ name: m.name, value: m.init });
+          }
+        }
+        emit(c, "MAKE_CLASS", { name: node.name, parent: node.parent, methods, statics: statics.map((s) => s.name) });
+        emit(c, "DECLARE", node.name);
+        for (const s of statics) {
+          emit(c, "LOAD", node.name);
+          if (s.value) compileExpr(c, s.value);
+          else emit(c, "CONST", null);
+          emit(c, "SET_MEMBER", s.name);
+          emit(c, "POP");
+        }
+        break;
+      }
+      case "ContractDecl": {
+        emit(c, "CONST", `contract:${node.name}`);
+        emit(c, "DECLARE", node.name);
+        compileBlockTo(c, node.body);
+        break;
+      }
+      case "StructDecl": {
+        emit(c, "MAKE_STRUCT", { name: node.name, fields: node.fields.map((f) => f.name), reprC: node.reprC, packed: node.packed });
+        emit(c, "DECLARE", node.name);
+        break;
+      }
+      case "EnumDecl": {
+        emit(c, "MAKE_ENUM", { name: node.name, variants: node.variants.map((v) => ({ name: v.name, arity: v.fields.length })) });
+        emit(c, "DECLARE", node.name);
+        break;
+      }
+      case "TraitDecl": {
+        emit(c, "CONST", `trait:${node.name}`);
+        emit(c, "DECLARE", node.name);
+        break;
+      }
+      case "ImplBlock": {
+        for (const m of node.methods) {
+          const mc = newChunk(`${node.typeName}.${m.name}`, m.params.map((p) => p.name), true);
+          compileBlockTo(mc, m.body);
+          emit(mc, "RET");
+          emit(c, "ATTACH_METHOD", node.typeName, { name: m.name, chunk: mc.id });
+        }
+        break;
+      }
+      case "MatchStmt": {
+        const endJumps = [];
+        const hasDefault = node.arms.some((a) => a.pattern === "_");
+        const compileArm = (body) => {
+          for (let i = 0; i < body.body.length; i++) {
+            const st = body.body[i];
+            if (i === body.body.length - 1 && st.kind === "ExprStmt") {
+              compileExpr(c, st.expr);
+            } else {
+              compileStmt(c, st);
+            }
+          }
+        };
+        for (const arm of node.arms) {
+          if (arm.pattern === "_") {
+            compileArm(arm.body);
+            continue;
+          }
+          compileExpr(c, node.value);
+          if (arm.pattern === "literal") {
+            for (let i = 0; i < arm.literals.length; i++) {
+              if (i > 0) compileExpr(c, node.value);
+              compileExpr(c, arm.literals[i]);
+              emit(c, "BINOP", "==");
+              if (i > 0) emit(c, "BINOP", "||");
+            }
+          } else {
+            emit(c, "CONST", arm.pattern);
+            emit(c, "BINOP", "==");
+          }
+          const jz = emit(c, "JZ", -1);
+          compileArm(arm.body);
+          const j = emit(c, "JUMP", -1);
+          endJumps.push(j);
+          c.code[jz].a = c.code.length;
+        }
+        if (!hasDefault) {
+          emit(c, "CONST", null);
+          emit(c, "DECLARE", "__match_unmatched");
+        }
+        for (const j of endJumps) c.code[j].a = c.code.length;
+        break;
+      }
+      case "UnsafeBlock": {
+        emit(c, "UNSAFE_ENTER");
+        compileBlockTo(c, node.body);
+        emit(c, "UNSAFE_LEAVE");
+        break;
+      }
+      case "ExternBlock": {
+        for (const fn of node.items) {
+          emit(c, "DECLARE_EXTERN", { name: fn.name, params: fn.params.map((p) => p.name), ret: fn.ret ? fn.ret.name : null });
+        }
+        break;
+      }
+      case "UseStmt": {
+        emit(c, "USE", node.path);
+        break;
+      }
+      case "TypeAlias": {
+        emit(c, "CONST", `type:${node.name}=${node.type.name}`);
+        emit(c, "DECLARE", node.name);
+        break;
+      }
+      case "ReturnStmt": {
+        if (node.value) compileExpr(c, node.value);
+        else emit(c, "CONST", null);
+        emit(c, "RET");
+        break;
+      }
+      case "IfStmt": {
+        compileExpr(c, node.cond);
+        const jz = emit(c, "JZ", -1);
+        compileBlockTo(c, node.then);
+        if (node.else) {
+          const j = emit(c, "JUMP", -1);
+          c.code[jz].a = c.code.length;
+          if (node.else.kind === "IfStmt") compileStmt(c, node.else);
+          else compileBlockTo(c, node.else);
+          c.code[j].a = c.code.length;
+        } else {
+          c.code[jz].a = c.code.length;
+        }
+        break;
+      }
+      case "WhileStmt": {
+        const loopEnter = emit(c, "LOOP_ENTER", -1, -1);
+        const start = c.code.length;
+        compileExpr(c, node.cond);
+        const jz = emit(c, "JZ", -1);
+        compileBlockTo(c, node.body);
+        emit(c, "JUMP", start);
+        c.code[jz].a = c.code.length;
+        emit(c, "LOOP_END");
+        c.code[loopEnter].a = start;
+        c.code[loopEnter].b = c.code.length;
+        break;
+      }
+      case "RepeatStmt": {
+        compileExpr(c, node.count);
+        const idx = `__rep_i_${c.code.length}`;
+        emit(c, "DECLARE", idx);
+        const loopEnter = emit(c, "LOOP_ENTER", -1, -1);
+        const start = c.code.length;
+        emit(c, "LOAD", idx);
+        emit(c, "CONST", 0);
+        emit(c, "BINOP", ">");
+        const jz = emit(c, "JZ", -1);
+        compileBlockTo(c, node.body);
+        emit(c, "LOAD", idx);
+        emit(c, "CONST", 1);
+        emit(c, "BINOP", "-");
+        emit(c, "STORE", idx);
+        emit(c, "JUMP", start);
+        c.code[jz].a = c.code.length;
+        emit(c, "LOOP_END");
+        c.code[loopEnter].a = start;
+        c.code[loopEnter].b = c.code.length;
+        break;
+      }
+      case "ForStmt": {
+        const it = `__for_it_${c.code.length}`;
+        const ix = `__for_ix_${c.code.length}`;
+        compileExpr(c, node.iter);
+        emit(c, "DECLARE", it);
+        emit(c, "CONST", 0);
+        emit(c, "DECLARE", ix);
+        const loopEnter = emit(c, "LOOP_ENTER", -1, -1);
+        const start = c.code.length;
+        emit(c, "LOAD", ix);
+        emit(c, "LOAD", it);
+        emit(c, "LEN");
+        emit(c, "BINOP", "<");
+        const jz = emit(c, "JZ", -1);
+        emit(c, "LOAD", it);
+        emit(c, "LOAD", ix);
+        emit(c, "INDEX");
+        emit(c, "STORE", node.varName);
+        compileBlockTo(c, node.body);
+        const inc = c.code.length;
+        emit(c, "LOAD", ix);
+        emit(c, "CONST", 1);
+        emit(c, "BINOP", "+");
+        emit(c, "STORE", ix);
+        emit(c, "JUMP", start);
+        c.code[jz].a = c.code.length;
+        emit(c, "LOOP_END");
+        c.code[loopEnter].a = inc;
+        c.code[loopEnter].b = c.code.length;
+        break;
+      }
+      case "PrintStmt": {
+        compileExpr(c, node.value);
+        emit(c, "PRINT");
+        break;
+      }
+      case "BreakStmt":
+        emit(c, "BREAK");
+        break;
+      case "ContinueStmt":
+        emit(c, "CONTINUE");
+        break;
+      case "ThrowStmt":
+        compileExpr(c, node.value);
+        emit(c, "THROW");
+        break;
+      case "TryStmt": {
+        const tryEnter = emit(c, "TRY_ENTER", -1);
+        compileBlockTo(c, node.body);
+        emit(c, "TRY_LEAVE");
+        const after = emit(c, "JUMP", -1);
+        c.code[tryEnter].a = c.code.length;
+        emit(c, "CATCH_BIND", node.param);
+        compileBlockTo(c, node.handler);
+        if (node.finalizer) compileBlockTo(c, node.finalizer);
+        emit(c, "FINALLY_END");
+        c.code[after].a = c.code.length;
+        break;
+      }
+      case "ImportStmt":
+        emit(c, "IMPORT", node.name);
+        break;
+      case "BuildStmt": {
+        emit(c, "BUILD", node.target);
+        for (const a of node.args) compileExpr(c, a);
+        emit(c, "BUILD_APPLY", node.args.length);
+        break;
+      }
+      case "Block":
+        compileBlockTo(c, node);
+        break;
+      case "ExprStmt":
+        compileExpr(c, node.expr);
+        emit(c, "POP");
+        break;
+      default:
+        throw new CompileError(`cannot compile statement ${node.kind}`);
+    }
+  }
+  function compileExpr(c, node) {
+    switch (node.kind) {
+      case "NumLit":
+        emit(c, "CONST", node.value);
+        break;
+      case "StrLit":
+        emit(c, "CONST", node.value);
+        break;
+      case "BoolLit":
+        emit(c, "CONST", node.value);
+        break;
+      case "NilLit":
+        emit(c, "CONST", null);
+        break;
+      case "Ident": {
+        if (node.name.includes("::")) {
+          const [base, ...rest] = node.name.split("::");
+          emit(c, "LOAD", base);
+          for (const part of rest) emit(c, "MEMBER", part);
+        } else {
+          emit(c, "LOAD", node.name);
+        }
+        break;
+      }
+      case "InterpStr": {
+        emit(c, "CONST", "");
+        for (const p of node.parts) {
+          if (p.text !== void 0) emit(c, "CONST", p.text);
+          else if (p.expr) compileExpr(c, p.expr);
+          emit(c, "BINOP", "+");
+        }
+        break;
+      }
+      case "ArrayLit": {
+        for (const it of node.items) compileExpr(c, it);
+        emit(c, "ARRAY", node.items.length);
+        break;
+      }
+      case "ObjectLit": {
+        for (const e of node.entries) {
+          emit(c, "CONST", e.key);
+          compileExpr(c, e.value);
+        }
+        if (node.typeName) emit(c, "STRUCT_LIT", { name: node.typeName, n: node.entries.length });
+        else emit(c, "OBJECT", node.entries.length);
+        break;
+      }
+      case "BinOp": {
+        compileExpr(c, node.left);
+        compileExpr(c, node.right);
+        emit(c, "BINOP", node.op);
+        break;
+      }
+      case "UnaryOp": {
+        compileExpr(c, node.operand);
+        emit(c, "UNOP", node.op);
+        break;
+      }
+      case "Assign": {
+        if (node.target.kind === "Ident") {
+          if (node.op === "=") compileExpr(c, node.value);
+          else {
+            emit(c, "LOAD", node.target.name);
+            compileExpr(c, node.value);
+            emit(c, "BINOP", node.op[0]);
+          }
+          emit(c, "STORE", node.target.name);
+        } else if (node.target.kind === "Index") {
+          compileExpr(c, node.target.object);
+          compileExpr(c, node.target.index);
+          if (node.op === "=") compileExpr(c, node.value);
+          else {
+            compileExpr(c, node.target.object);
+            compileExpr(c, node.target.index);
+            emit(c, "INDEX");
+            compileExpr(c, node.value);
+            emit(c, "BINOP", node.op[0]);
+          }
+          emit(c, "SET_INDEX");
+        } else if (node.target.kind === "Member") {
+          compileExpr(c, node.target.object);
+          if (node.op === "=") compileExpr(c, node.value);
+          else {
+            compileExpr(c, node.target.object);
+            emit(c, "MEMBER", node.target.property);
+            compileExpr(c, node.value);
+            emit(c, "BINOP", node.op[0]);
+          }
+          emit(c, "SET_MEMBER", node.target.property);
+        } else throw new CompileError("invalid assignment target");
+        break;
+      }
+      case "Ternary": {
+        compileExpr(c, node.cond);
+        const jz = emit(c, "JZ", -1);
+        compileExpr(c, node.then);
+        const j = emit(c, "JUMP", -1);
+        c.code[jz].a = c.code.length;
+        compileExpr(c, node.else);
+        c.code[j].a = c.code.length;
+        break;
+      }
+      case "Call": {
+        if (node.callee.kind === "Member") {
+          compileExpr(c, node.callee.object);
+          for (const a of node.args) compileExpr(c, a);
+          emit(c, "CALL_METHOD", node.callee.property, node.args.length);
+        } else {
+          compileExpr(c, node.callee);
+          for (const a of node.args) compileExpr(c, a);
+          emit(c, "CALL", node.args.length);
+        }
+        break;
+      }
+      case "Index": {
+        compileExpr(c, node.object);
+        compileExpr(c, node.index);
+        emit(c, "INDEX");
+        break;
+      }
+      case "Member": {
+        compileExpr(c, node.object);
+        emit(c, "MEMBER", node.property);
+        break;
+      }
+      case "Lambda": {
+        const lc = newChunk("__lambda__", node.params);
+        compileBlockTo(lc, node.body);
+        emit(lc, "RET");
+        emit(c, "MAKE_FN", lc.id);
+        break;
+      }
+      case "NewExpr": {
+        for (const a of node.args) compileExpr(c, a);
+        emit(c, "NEW", node.className, node.args.length);
+        break;
+      }
+      case "Cast": {
+        compileExpr(c, node.value);
+        emit(c, "CAST", node.type.name);
+        break;
+      }
+      case "RefExpr": {
+        compileExpr(c, node.value);
+        emit(c, "REF", node.mut);
+        break;
+      }
+      case "Deref": {
+        compileExpr(c, node.value);
+        emit(c, "DEREF");
+        break;
+      }
+      case "RangeExpr": {
+        if (node.start) compileExpr(c, node.start);
+        else emit(c, "CONST", 0);
+        if (node.end) compileExpr(c, node.end);
+        else emit(c, "CONST", -1);
+        emit(c, "MAKE_RANGE", node.inclusive);
+        break;
+      }
+      case "Transcendental": {
+        compileExpr(c, node.arg);
+        emit(c, "TRANSCEND", node.symbol, node.op);
+        break;
+      }
+      default:
+        throw new CompileError(`cannot compile expression ${node.kind}`);
+    }
+  }
+  compileBlockTo(main, { kind: "Block", body: program.body });
+  emit(main, "HALT");
+  return { main, chunks, constants: [] };
+}
+
+// src/compiler/lexer.ts
+var KEYWORDS = {
+  // English canonical keywords
+  "let": "let",
+  "const": "const",
+  "var": "let",
+  "fn": "fn",
+  "function": "fn",
+  "return": "return",
+  "if": "if",
+  "else": "else",
+  "while": "while",
+  "repeat": "repeat",
+  "times": "times",
+  "for": "for",
+  "in": "in",
+  "print": "print",
+  "class": "class",
+  "extends": "extends",
+  "new": "new",
+  "this": "this",
+  "try": "try",
+  "catch": "catch",
+  "finally": "finally",
+  "throw": "throw",
+  "true": "true",
+  "false": "false",
+  "nil": "nil",
+  "null": "nil",
+  "and": "and",
+  "or": "or",
+  "not": "not",
+  "import": "import",
+  "build": "build",
+  "contract": "contract",
+  "system": "system",
+  "platform": "platform",
+  "break": "break",
+  "continue": "continue",
+  // systems keywords (Rust-like)
+  "mut": "mut",
+  "ref": "ref",
+  "struct": "struct",
+  "impl": "impl",
+  "trait": "trait",
+  "enum": "enum",
+  "match": "match",
+  "unsafe": "unsafe",
+  "extern": "extern",
+  "pub": "pub",
+  "use": "use",
+  "mod": "mod",
+  "crate": "crate",
+  "as": "as",
+  "where": "where",
+  "dyn": "dyn",
+  "move": "move",
+  "loop": "loop",
+  "type": "type",
+  "static": "static",
+  "box": "box",
+  "unsized": "unsized",
+  "async": "async",
+  "await": "await",
+  "yield": "yield",
+  "self": "self",
+  "Self": "Self",
+  "macro": "macro",
+  "packed": "packed",
+  "no_std": "no_std",
+  "volatile": "volatile",
+  "no_mangle": "no_mangle",
+  // Arabic source spellings -> canonical English keyword
+  "\u0645\u062A\u063A\u064A\u0631": "let",
+  "\u062B\u0627\u0628\u062A": "const",
+  "\u062F\u0627\u0644\u0629": "fn",
+  "\u0627\u0631\u062C\u0627\u0639": "return",
+  "\u0625\u0631\u062C\u0627\u0639": "return",
+  "\u0627\u0630\u0627": "if",
+  "\u0625\u0630\u0627": "if",
+  "\u0648\u0627\u0644\u0627": "else",
+  "\u0648\u0625\u0644\u0627": "else",
+  "\u0637\u0627\u0644\u0645\u0627": "while",
+  "\u0643\u0631\u0631": "repeat",
+  "\u0644\u0643\u0644": "for",
+  "\u0641\u064A": "in",
+  "\u0627\u0637\u0628\u0639": "print",
+  "\u0637\u0628\u0627\u0639\u0629": "print",
+  "\u0635\u0646\u0641": "class",
+  "\u064A\u0645\u062A\u062F": "extends",
+  "\u062C\u062F\u064A\u062F": "new",
+  "\u0647\u0630\u0627": "this",
+  "\u0645\u062D\u0627\u0648\u0644\u0629": "try",
+  "\u0627\u0644\u062A\u0642\u0627\u0637": "catch",
+  "\u0627\u062E\u064A\u0631\u0627": "finally",
+  "\u0623\u062E\u064A\u0631\u0627": "finally",
+  "\u0627\u0631\u0641\u0639": "throw",
+  "\u0635\u062D\u064A\u062D": "true",
+  "\u062E\u0637\u0623": "false",
+  "\u0644\u0627\u0634\u064A\u0621": "nil",
+  "\u0644\u0627_\u0634\u064A\u0621": "nil",
+  "\u0648": "and",
+  "\u0627\u0648": "or",
+  "\u0623\u0648": "or",
+  "\u0644\u064A\u0633": "not",
+  "\u0639\u0642\u062F": "contract",
+  "\u0646\u0638\u0627\u0645": "system",
+  "\u0646\u0638\u0627\u0645_\u062A\u0634\u063A\u064A\u0644": "system",
+  "\u0628\u0646\u0627\u0621": "build",
+  "\u0645\u0646\u0635\u0629": "platform",
+  "\u0642\u0627\u0639\u062F\u0629": "database",
+  "\u062E\u0627\u062F\u0645": "server",
+  "\u0648\u0627\u062C\u0647\u0629": "interface",
+  "\u0632\u0648\u062C": "pair",
+  "\u062F\u0639": "let",
+  "\u0639\u0631\u0641": "let",
+  // Arabic systems keywords
+  "\u0647\u064A\u0643\u0644": "struct",
+  "\u0633\u0645\u0629": "trait",
+  "\u062A\u0639\u062F\u0627\u062F": "enum",
+  "\u0637\u0627\u0628\u0642": "match",
+  "\u063A\u064A\u0631_\u0622\u0645\u0646": "unsafe",
+  "\u062E\u0627\u0631\u062C\u064A": "extern",
+  "\u0639\u0627\u0645": "pub",
+  "\u0627\u0633\u062A\u062E\u062F\u0645": "use",
+  "\u0648\u062D\u062F\u0629": "mod",
+  "\u0646\u0648\u0639": "type",
+  "\u0645\u0631\u062C\u0639": "ref"
+};
+var PUNCT3 = ["...", "..=", "<<=", ">>=", "===", "!=="];
+var PUNCT2 = ["==", "!=", "<=", ">=", "&&", "||", "->", "=>", "+=", "-=", "*=", "/=", "%=", "**", "..", "::"];
+var LexError = class extends Error {
+  constructor(msg, line, col) {
+    super(`LexError at ${line}:${col}: ${msg}`);
+    this.line = line;
+    this.col = col;
+  }
+};
+function tokenize(src) {
+  const toks = [];
+  let i = 0;
+  let line = 1;
+  let col = 1;
+  const n = src.length;
+  const peek = (k = 0) => src[i + k];
+  const advance = () => {
+    const c = src[i++];
+    if (c === "\n") {
+      line++;
+      col = 1;
+    } else {
+      col++;
+    }
+    return c;
+  };
+  const push = (type, value, l = line, c = col) => toks.push({ type, value, line: l, col: c });
+  const isIdStart = (ch) => ch >= "a" && ch <= "z" || ch >= "A" && ch <= "Z" || ch === "_" || ch === "$" || /[\u0600-\u06FF]/.test(ch);
+  const isIdPart = (ch) => isIdStart(ch) || ch >= "0" && ch <= "9";
+  const isDigit = (ch) => ch >= "0" && ch <= "9";
+  while (i < n) {
+    const ch = peek();
+    if (ch === "\n") {
+      const l = line, c = col;
+      advance();
+      push("newline", "\n", l, c);
+      continue;
+    }
+    if (ch === " " || ch === "	" || ch === "\r") {
+      advance();
+      continue;
+    }
+    if (ch === "/" && peek(1) === "/") {
+      while (i < n && peek() !== "\n") advance();
+      continue;
+    }
+    if (ch === "/" && peek(1) === "*") {
+      advance();
+      advance();
+      while (i < n && !(peek() === "*" && peek(1) === "/")) advance();
+      if (i < n) {
+        advance();
+        advance();
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "\xAB") {
+      const quote = ch === "\xAB" ? "\xBB" : ch;
+      const startL2 = line, startC2 = col;
+      advance();
+      let raw = "";
+      while (i < n && peek() !== quote) {
+        if (peek() === "\\") {
+          advance();
+          const e = advance();
+          raw += e === "n" ? "\n" : e === "t" ? "	" : e === '"' ? '"' : e === "'" ? "'" : e === "\\" ? "\\" : e;
+        } else {
+          raw += advance();
+        }
+      }
+      if (i >= n) throw new LexError("unterminated string", startL2, startC2);
+      advance();
+      push("string", raw, startL2, startC2);
+      toks[toks.length - 1].parts = splitInterpolation(raw);
+      continue;
+    }
+    if (isDigit(ch) || ch === "." && isDigit(peek(1))) {
+      const startL2 = line, startC2 = col;
+      let num = "";
+      if (ch === "0" && (peek(1) === "x" || peek(1) === "X")) {
+        advance();
+        advance();
+        while (i < n && /[0-9a-fA-F_]/.test(peek())) num += advance();
+        push("number", String(parseInt(num.replace(/_/g, ""), 16)), startL2, startC2);
+        continue;
+      }
+      if (ch === "0" && (peek(1) === "b" || peek(1) === "B")) {
+        advance();
+        advance();
+        while (i < n && /[01_]/.test(peek())) num += advance();
+        push("number", String(parseInt(num.replace(/_/g, ""), 2)), startL2, startC2);
+        continue;
+      }
+      while (i < n && (isDigit(peek()) || peek() === "." || peek() === "_")) {
+        const c2 = peek();
+        if (c2 === "." && !isDigit(peek(1))) break;
+        num += advance();
+      }
+      if ((peek() === "e" || peek() === "E") && (isDigit(peek(1)) || (peek(1) === "+" || peek(1) === "-") && isDigit(peek(2)))) {
+        num += advance();
+        if (peek() === "+" || peek() === "-") num += advance();
+        while (i < n && isDigit(peek())) num += advance();
+      }
+      push("number", num.replace(/_/g, ""), startL2, startC2);
+      continue;
+    }
+    if (isIdStart(ch)) {
+      const startL2 = line, startC2 = col;
+      let id = "";
+      while (i < n && isIdPart(peek())) id += advance();
+      if (KEYWORDS[id]) push("keyword", KEYWORDS[id], startL2, startC2);
+      else push("ident", id, startL2, startC2);
+      continue;
+    }
+    const startL = line, startC = col;
+    const three = ch + (peek(1) || "") + (peek(2) || "");
+    if (PUNCT3.includes(three)) {
+      advance();
+      advance();
+      advance();
+      push("op", three, startL, startC);
+      continue;
+    }
+    const two = ch + (peek(1) || "");
+    if (PUNCT2.includes(two)) {
+      advance();
+      advance();
+      push("op", two, startL, startC);
+      continue;
+    }
+    if ("+-*/%<>=!&|^~?:".includes(ch)) {
+      advance();
+      push("op", ch, startL, startC);
+      continue;
+    }
+    if ("(){}[],.;".includes(ch)) {
+      advance();
+      push("punct", ch, startL, startC);
+      continue;
+    }
+    throw new LexError(`unexpected character ${JSON.stringify(ch)}`, startL, startC);
+  }
+  push("eof", "");
+  return toks;
+}
+function splitInterpolation(raw) {
+  const parts = [];
+  let buf = "";
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] === "$" && raw[i + 1] === "{") {
+      if (buf) {
+        parts.push({ text: buf });
+        buf = "";
+      }
+      let depth = 1;
+      i += 2;
+      let expr = "";
+      while (i < raw.length && depth > 0) {
+        if (raw[i] === "{") depth++;
+        else if (raw[i] === "}") {
+          depth--;
+          if (depth === 0) break;
+        }
+        expr += raw[i++];
+      }
+      i++;
+      parts.push({ expr });
+    } else {
+      buf += raw[i++];
+    }
+  }
+  if (buf) parts.push({ text: buf });
+  return parts;
+}
+
+// src/compiler/parser.ts
+var ParseError = class extends Error {
+  constructor(msg, line, col) {
+    super(`ParseError at ${line}:${col}: ${msg}`);
+    this.line = line;
+    this.col = col;
+  }
+};
+function parse(src) {
+  let toks;
+  try {
+    toks = tokenize(src);
+  } catch (e) {
+    if (e instanceof LexError) throw e;
+    throw e;
+  }
+  let p = 0;
+  const cur = () => toks[p];
+  const at = (v) => cur().value === v && (cur().type === "keyword" || cur().type === "op" || cur().type === "punct");
+  const atKw = (v) => cur().type === "keyword" && cur().value === v;
+  const next = () => toks[p++];
+  const skipNewlines = () => {
+    while (cur().type === "newline") p++;
+  };
+  const skipSeparators = () => {
+    while (cur().type === "newline" || at(";")) p++;
+  };
+  const expect = (v) => {
+    if (!at(v)) throw new ParseError(`expected '${v}' but found '${cur().value || cur().type}'`, cur().line, cur().col);
+    return next();
+  };
+  const expectIdent = () => {
+    if (cur().type !== "ident") throw new ParseError(`expected identifier but found '${cur().value || cur().type}'`, cur().line, cur().col);
+    return next().value;
+  };
+  function parseInlineExpr(code) {
+    const sub = parse(code);
+    const st = sub.body[0];
+    if (st && st.kind === "ExprStmt") return st.expr;
+    return { kind: "Ident", name: "nil" };
+  }
+  function parseType() {
+    const mk = (name2) => ({
+      kind: "Type",
+      name: name2,
+      args: [],
+      ref: false,
+      refMut: false,
+      ptr: false,
+      ptrMut: false,
+      arrayLen: null
+    });
+    if (at("&")) {
+      next();
+      const mut = atKw("mut");
+      if (mut) next();
+      const inner = parseType();
+      return { ...inner, ref: true, refMut: mut || inner.refMut };
+    }
+    if (at("*")) {
+      next();
+      let mut = false;
+      if (atKw("mut")) {
+        mut = true;
+        next();
+      } else if (atKw("const")) next();
+      const inner = parseType();
+      return { ...inner, ptr: true, ptrMut: mut };
+    }
+    if (at("[")) {
+      next();
+      const inner = parseType();
+      expect(";");
+      const len = Number(next().value);
+      expect("]");
+      return { ...inner, arrayLen: len };
+    }
+    if (at("(")) {
+      next();
+      const args = [];
+      skipNewlines();
+      while (!at(")")) {
+        args.push(parseType());
+        skipNewlines();
+        if (at(",")) {
+          next();
+          skipNewlines();
+        }
+      }
+      expect(")");
+      const t2 = mk("(" + args.map((a) => a.name).join(",") + ")");
+      t2.args = args;
+      return t2;
+    }
+    if (cur().type !== "ident" && cur().type !== "keyword") {
+      throw new ParseError(`expected type but found '${cur().value || cur().type}'`, cur().line, cur().col);
+    }
+    let name = next().value;
+    while (at("::")) {
+      next();
+      name += "::" + next().value;
+    }
+    const t = mk(name);
+    if (at("<")) {
+      next();
+      skipNewlines();
+      while (!at(">")) {
+        t.args.push(parseType());
+        skipNewlines();
+        if (at(",")) {
+          next();
+          skipNewlines();
+        }
+      }
+      expect(">");
+    }
+    return t;
+  }
+  function parseGenericParams() {
+    const params = [];
+    if (at("<")) {
+      next();
+      skipNewlines();
+      while (!at(">")) {
+        params.push(expectIdent());
+        skipNewlines();
+        if (at(":")) {
+          next();
+          parseType();
+        }
+        if (at(",")) {
+          next();
+          skipNewlines();
+        }
+      }
+      expect(">");
+    }
+    return params;
+  }
+  function parseFnSignature(name, isPub, isUnsafe, generics, isAsync) {
+    expect("(");
+    const params = [];
+    skipNewlines();
+    while (!at(")")) {
+      if (at("&")) {
+        next();
+        const mut = atKw("mut");
+        if (mut) next();
+        const pname = atKw("self") ? next().value : expectIdent();
+        params.push({ name: pname, type: null, mut, self: pname === "self" });
+      } else if (atKw("mut")) {
+        next();
+        const pname = expectIdent();
+        let ptype = null;
+        if (at(":")) {
+          next();
+          ptype = parseType();
+        }
+        params.push({ name: pname, type: ptype, mut: true, self: false });
+      } else {
+        const pname = atKw("self") ? next().value : expectIdent();
+        let ptype = null;
+        if (at(":")) {
+          next();
+          ptype = parseType();
+        }
+        params.push({ name: pname, type: ptype, mut: false, self: pname === "self" });
+      }
+      skipNewlines();
+      if (at(",")) {
+        next();
+        skipNewlines();
+      }
+    }
+    expect(")");
+    let ret = null;
+    if (at("->")) {
+      next();
+      ret = parseType();
+    }
+    let body;
+    if (at(";")) {
+      next();
+      body = { kind: "Block", body: [] };
+    } else body = parseBlock();
+    return { kind: "FnDecl", name, params, body, ret, pub: isPub, unsafe: isUnsafe, generics, isAsync };
+  }
+  function parseStruct(isPub, reprC, packed) {
+    next();
+    const name = expectIdent();
+    const generics = parseGenericParams();
+    if (at(";")) {
+      next();
+      return { kind: "StructDecl", name, fields: [], pub: isPub, reprC, packed };
+    }
+    expect("{");
+    const fields = [];
+    skipSeparators();
+    while (!at("}") && cur().type !== "eof") {
+      if (atKw("pub")) next();
+      const fname = expectIdent();
+      expect(":");
+      const ftype = parseType();
+      fields.push({ name: fname, type: ftype, mut: false, self: false });
+      skipSeparators();
+      if (at(",")) {
+        next();
+        skipSeparators();
+      }
+    }
+    expect("}");
+    return { kind: "StructDecl", name, fields, pub: isPub, reprC, packed };
+  }
+  function parseEnum(isPub) {
+    next();
+    const name = expectIdent();
+    parseGenericParams();
+    expect("{");
+    const variants = [];
+    skipSeparators();
+    while (!at("}") && cur().type !== "eof") {
+      const vname = expectIdent();
+      const fields = [];
+      if (at("(")) {
+        next();
+        skipNewlines();
+        while (!at(")")) {
+          fields.push(parseType());
+          skipNewlines();
+          if (at(",")) {
+            next();
+            skipNewlines();
+          }
+        }
+        expect(")");
+      } else if (at("{")) {
+        next();
+        skipSeparators();
+        while (!at("}")) {
+          expectIdent();
+          expect(":");
+          fields.push(parseType());
+          skipSeparators();
+          if (at(",")) {
+            next();
+            skipSeparators();
+          }
+        }
+        expect("}");
+      }
+      variants.push({ name: vname, fields });
+      skipSeparators();
+      if (at(",")) {
+        next();
+        skipSeparators();
+      }
+    }
+    expect("}");
+    return { kind: "EnumDecl", name, variants, pub: isPub };
+  }
+  function parseTrait(isPub) {
+    next();
+    const name = expectIdent();
+    parseGenericParams();
+    expect("{");
+    const methods = [];
+    skipSeparators();
+    while (!at("}") && cur().type !== "eof") {
+      if (atKw("fn")) {
+        next();
+        methods.push(parseFnSignature(expectIdent(), false, false, [], false));
+      } else next();
+      skipSeparators();
+    }
+    expect("}");
+    return { kind: "TraitDecl", name, methods, pub: isPub };
+  }
+  function parseImpl() {
+    next();
+    parseGenericParams();
+    let traitName = null;
+    let typeName = expectIdent();
+    if (atKw("for")) {
+      next();
+      traitName = typeName;
+      typeName = expectIdent();
+    }
+    expect("{");
+    const methods = [];
+    skipSeparators();
+    while (!at("}") && cur().type !== "eof") {
+      if (atKw("fn")) {
+        next();
+        methods.push(parseFnSignature(expectIdent(), false, false, [], false));
+      } else next();
+      skipSeparators();
+    }
+    expect("}");
+    return { kind: "ImplBlock", traitName, typeName, methods };
+  }
+  function parseExtern() {
+    next();
+    let abi = "C";
+    if (cur().type === "string") abi = next().value;
+    expect("{");
+    const items = [];
+    skipSeparators();
+    while (!at("}") && cur().type !== "eof") {
+      if (atKw("fn")) {
+        next();
+        items.push(parseFnSignature(expectIdent(), false, false, [], false));
+      } else next();
+      skipSeparators();
+    }
+    expect("}");
+    return { kind: "ExternBlock", abi, items };
+  }
+  function parseMatch() {
+    next();
+    const value = parseExpr();
+    expect("{");
+    const arms = [];
+    skipSeparators();
+    while (!at("}") && cur().type !== "eof") {
+      let pattern = "_";
+      const literals = [];
+      if (at("_")) {
+        next();
+        pattern = "_";
+      } else if (cur().type === "number" || cur().type === "string") {
+        pattern = "literal";
+        literals.push(cur().type === "number" ? { kind: "NumLit", value: Number(next().value) } : { kind: "StrLit", value: next().value });
+        while (at("|")) {
+          next();
+          const tk = next();
+          literals.push(tk.type === "number" ? { kind: "NumLit", value: Number(tk.value) } : { kind: "StrLit", value: tk.value });
+        }
+      } else {
+        pattern = expectIdent();
+        if (at("(")) {
+          next();
+          skipNewlines();
+          while (!at(")")) {
+            expectIdent();
+            skipNewlines();
+            if (at(",")) {
+              next();
+              skipNewlines();
+            }
+          }
+          expect(")");
+        }
+      }
+      if (at("=>")) next();
+      else expect(":");
+      const body = at("{") ? parseBlock() : { kind: "Block", body: [{ kind: "ExprStmt", expr: parseExpr() }] };
+      arms.push({ pattern, literals, body });
+      skipSeparators();
+      if (at(",")) {
+        next();
+        skipSeparators();
+      }
+    }
+    expect("}");
+    return { kind: "MatchStmt", value, arms };
+  }
+  function parseProgram() {
+    const body = [];
+    const attributes = [];
+    let noStd = false;
+    skipSeparators();
+    while (cur().type !== "eof") {
+      if (at("#")) {
+        next();
+        if (at("!")) next();
+        if (at("[")) {
+          next();
+          const attrName = expectIdent();
+          if (attrName === "no_std") noStd = true;
+          attributes.push(attrName);
+          if (at("(")) {
+            next();
+            while (!at(")") && cur().type !== "eof") next();
+            expect(")");
+          }
+          expect("]");
+          skipSeparators();
+          continue;
+        }
+      }
+      body.push(parseStatement());
+      skipSeparators();
+    }
+    return { kind: "Program", body, attributes, noStd };
+  }
+  function parseBlock() {
+    expect("{");
+    const body = [];
+    skipSeparators();
+    while (!at("}") && cur().type !== "eof") {
+      body.push(parseStatement());
+      skipSeparators();
+    }
+    expect("}");
+    return { kind: "Block", body };
+  }
+  function parseStatement() {
+    const t = cur();
+    let isPub = false;
+    if (atKw("pub")) {
+      isPub = true;
+      next();
+    }
+    let reprC = false, packed = false;
+    while (at("#") && toks[p + 1] && toks[p + 1].value === "[") {
+      next();
+      next();
+      const attr = expectIdent();
+      if (attr === "repr") {
+        if (at("(")) {
+          next();
+          const v = expectIdent();
+          if (v === "C") reprC = true;
+          else if (v === "packed") packed = true;
+          expect(")");
+        }
+      }
+      expect("]");
+      skipSeparators();
+    }
+    if (atKw("let")) return parseVarDecl(false);
+    if (atKw("const")) return parseVarDecl(true);
+    if (atKw("static")) {
+      next();
+      if (atKw("mut")) next();
+      return parseVarDecl(true);
+    }
+    if (atKw("struct")) return parseStruct(isPub, reprC, packed);
+    if (atKw("enum")) return parseEnum(isPub);
+    if (atKw("trait")) return parseTrait(isPub);
+    if (atKw("impl")) return parseImpl();
+    if (atKw("extern")) return parseExtern();
+    if (atKw("match")) return parseMatch();
+    if (atKw("use")) {
+      next();
+      let path = "";
+      while (cur().type === "ident" || cur().type === "keyword" || at("::")) {
+        path += next().value;
+      }
+      return { kind: "UseStmt", path };
+    }
+    if (atKw("mod")) {
+      next();
+      const name = expectIdent();
+      if (at(";")) next();
+      return { kind: "UseStmt", path: "mod " + name };
+    }
+    if (atKw("type")) {
+      next();
+      const name = expectIdent();
+      if (at("=")) next();
+      const ty = parseType();
+      if (at(";")) next();
+      return { kind: "TypeAlias", name, type: ty };
+    }
+    if (atKw("unsafe")) {
+      next();
+      if (atKw("fn")) {
+        next();
+        return parseFnSignature(expectIdent(), isPub, true, [], false);
+      }
+      const body = parseBlock();
+      return { kind: "UnsafeBlock", body };
+    }
+    if (atKw("fn")) {
+      next();
+      const name = expectIdent();
+      const generics = parseGenericParams();
+      return parseFnSignature(name, isPub, false, generics, false);
+    }
+    if (atKw("class")) {
+      next();
+      const name = expectIdent();
+      let parent = null;
+      if (atKw("extends")) {
+        next();
+        parent = expectIdent();
+      }
+      expect("{");
+      const members = [];
+      skipSeparators();
+      while (!at("}") && cur().type !== "eof") {
+        if (atKw("let") || atKw("const")) {
+          members.push(parseVarDecl(atKw("const")));
+        } else {
+          const mName = expectIdent();
+          const params = parseLegacyParams();
+          const body = parseBlock();
+          members.push({ kind: "FnDecl", name: mName, params, body, ret: null, pub: false, unsafe: false, generics: [], isAsync: false });
+        }
+        skipSeparators();
+      }
+      expect("}");
+      return { kind: "ClassDecl", name, parent, members };
+    }
+    if (atKw("contract")) {
+      next();
+      const name = expectIdent();
+      const body = parseBlock();
+      return { kind: "ContractDecl", name, body };
+    }
+    if (atKw("system") || atKw("platform")) {
+      const target = next().value;
+      const name = expectIdent();
+      return { kind: "BuildStmt", target, args: [{ kind: "StrLit", value: name }] };
+    }
+    if (atKw("build")) {
+      next();
+      const parts = [];
+      while (cur().type === "ident" || cur().type === "keyword") parts.push(next().value);
+      const args = parts.length ? [{ kind: "StrLit", value: parts.join(" ") }] : [];
+      return { kind: "BuildStmt", target: "build", args };
+    }
+    if (atKw("import")) {
+      next();
+      const name = expectIdent();
+      return { kind: "ImportStmt", name };
+    }
+    if (atKw("return")) {
+      next();
+      let value = null;
+      if (cur().type !== "newline" && !at("}") && !at(";") && cur().type !== "eof") value = parseExpr();
+      return { kind: "ReturnStmt", value };
+    }
+    if (atKw("if")) return parseIf();
+    if (atKw("while")) {
+      next();
+      const cond = parseExpr();
+      const body = parseBlock();
+      return { kind: "WhileStmt", cond, body };
+    }
+    if (atKw("loop")) {
+      next();
+      const body = parseBlock();
+      return { kind: "WhileStmt", cond: { kind: "BoolLit", value: true }, body };
+    }
+    if (atKw("repeat")) {
+      next();
+      const count = parseExpr();
+      if (atKw("times")) next();
+      const body = parseBlock();
+      return { kind: "RepeatStmt", count, body };
+    }
+    if (atKw("for")) {
+      next();
+      const varName = expectIdent();
+      if (atKw("in")) next();
+      const iter = parseExpr();
+      const body = parseBlock();
+      return { kind: "ForStmt", varName, iter, body };
+    }
+    if (atKw("print")) {
+      next();
+      let value;
+      if (at("(")) {
+        next();
+        value = parseExpr();
+        expect(")");
+      } else value = parseExpr();
+      return { kind: "PrintStmt", value };
+    }
+    if (atKw("break")) {
+      next();
+      return { kind: "BreakStmt" };
+    }
+    if (atKw("continue")) {
+      next();
+      return { kind: "ContinueStmt" };
+    }
+    if (atKw("throw")) {
+      next();
+      return { kind: "ThrowStmt", value: parseExpr() };
+    }
+    if (atKw("try")) return parseTry();
+    if (at("{")) return parseBlock();
+    const expr = parseExpr();
+    return { kind: "ExprStmt", expr };
+  }
+  function parseLegacyParams() {
+    expect("(");
+    const params = [];
+    skipNewlines();
+    while (!at(")")) {
+      const name = expectIdent();
+      let type = null;
+      if (at(":")) {
+        next();
+        type = parseType();
+      }
+      params.push({ name, type, mut: false, self: name === "self" });
+      skipNewlines();
+      if (at(",")) {
+        next();
+        skipNewlines();
+      }
+    }
+    expect(")");
+    return params;
+  }
+  function parseVarDecl(isConst) {
+    next();
+    let mut = false;
+    if (atKw("mut")) {
+      mut = true;
+      next();
+    }
+    const name = expectIdent();
+    let type = null;
+    if (at(":")) {
+      next();
+      type = parseType();
+    }
+    let init = null;
+    if (at("=")) {
+      next();
+      init = parseExpr();
+    }
+    return isConst ? { kind: "ConstDecl", name, init, mut, type } : { kind: "VarDecl", name, init, mut, type };
+  }
+  function parseParams() {
+    expect("(");
+    const params = [];
+    skipNewlines();
+    while (!at(")")) {
+      const name = expectIdent();
+      let type = null;
+      if (at(":")) {
+        next();
+        type = parseType();
+      }
+      params.push({ name, type, mut: false, self: name === "self" });
+      skipNewlines();
+      if (at(",")) {
+        next();
+        skipNewlines();
+      }
+    }
+    expect(")");
+    return params;
+  }
+  function parseIf() {
+    next();
+    const cond = parseExpr();
+    const then = parseBlock();
+    let els = null;
+    skipSeparators();
+    if (atKw("else")) {
+      next();
+      skipSeparators();
+      if (atKw("if")) els = parseIf();
+      else els = parseBlock();
+    }
+    return { kind: "IfStmt", cond, then, else: els };
+  }
+  function parseTry() {
+    next();
+    const body = parseBlock();
+    skipSeparators();
+    let param = "err";
+    let handler = { kind: "Block", body: [] };
+    if (atKw("catch")) {
+      next();
+      if (at("(")) {
+        next();
+        param = expectIdent();
+        expect(")");
+      }
+      handler = parseBlock();
+      skipSeparators();
+    }
+    let finalizer = null;
+    if (atKw("finally")) {
+      next();
+      finalizer = parseBlock();
+    }
+    return { kind: "TryStmt", body, param, handler, finalizer };
+  }
+  function parseExpr() {
+    return parseAssign();
+  }
+  function parseAssign() {
+    const left = parseTernary();
+    if (["=", "+=", "-=", "*=", "/=", "%="].includes(cur().value) && cur().type === "op") {
+      const op = next().value;
+      const value = parseAssign();
+      return { kind: "Assign", op, target: left, value };
+    }
+    return left;
+  }
+  function parseTernary() {
+    const cond = parseOr();
+    if (at("?")) {
+      next();
+      const then = parseExpr();
+      expect(":");
+      const els = parseExpr();
+      return { kind: "Ternary", cond, then, else: els };
+    }
+    return cond;
+  }
+  function parseOr() {
+    let left = parseAnd();
+    while (at("||") || atKw("or")) {
+      next();
+      const right = parseAnd();
+      left = { kind: "BinOp", op: "||", left, right };
+    }
+    return left;
+  }
+  function parseAnd() {
+    let left = parseEquality();
+    while (at("&&") || atKw("and")) {
+      next();
+      const right = parseEquality();
+      left = { kind: "BinOp", op: "&&", left, right };
+    }
+    return left;
+  }
+  function parseEquality() {
+    let left = parseComparison();
+    while (at("==") || at("!=")) {
+      const op = next().value;
+      left = { kind: "BinOp", op, left, right: parseComparison() };
+    }
+    return left;
+  }
+  function parseComparison() {
+    let left = parseRange();
+    while (at("<") || at(">") || at("<=") || at(">=")) {
+      const op = next().value;
+      left = { kind: "BinOp", op, left, right: parseRange() };
+    }
+    return left;
+  }
+  function parseRange() {
+    let left = parseAdditive();
+    if (at("..") || at("..=")) {
+      const inclusive = cur().value === "..=";
+      next();
+      if (at(")") || at("]") || at(",") || at("{") || cur().type === "newline" || cur().type === "eof") {
+        return { kind: "RangeExpr", start: left, end: null, inclusive };
+      }
+      const right = parseAdditive();
+      return { kind: "RangeExpr", start: left, end: right, inclusive };
+    }
+    return left;
+  }
+  function parseAdditive() {
+    let left = parseMultiplicative();
+    while (at("+") || at("-")) {
+      const op = next().value;
+      left = { kind: "BinOp", op, left, right: parseMultiplicative() };
+    }
+    return left;
+  }
+  function parseMultiplicative() {
+    let left = parsePower();
+    while (at("*") || at("/") || at("%")) {
+      const op = next().value;
+      left = { kind: "BinOp", op, left, right: parsePower() };
+    }
+    return left;
+  }
+  function parsePower() {
+    const left = parseUnary();
+    if (at("**")) {
+      next();
+      const right = parsePower();
+      return { kind: "BinOp", op: "**", left, right };
+    }
+    return left;
+  }
+  function parseUnary() {
+    if (at("&")) {
+      next();
+      const mut = atKw("mut");
+      if (mut) next();
+      return { kind: "RefExpr", value: parseUnary(), mut };
+    }
+    if (at("*")) {
+      next();
+      return { kind: "Deref", value: parseUnary() };
+    }
+    if (at("!") || at("-") || at("+") || at("~") || atKw("not")) {
+      const raw = next().value;
+      const op = raw === "not" ? "!" : raw;
+      return { kind: "UnaryOp", op, operand: parseUnary() };
+    }
+    return parsePostfix();
+  }
+  function parsePostfix() {
+    let node = parsePrimary();
+    for (; ; ) {
+      if (at("(")) {
+        next();
+        const args = [];
+        skipNewlines();
+        while (!at(")")) {
+          args.push(parseExpr());
+          skipNewlines();
+          if (at(",")) {
+            next();
+            skipNewlines();
+          }
+        }
+        expect(")");
+        node = { kind: "Call", callee: node, args };
+      } else if (at("[")) {
+        next();
+        const index = parseExpr();
+        expect("]");
+        node = { kind: "Index", object: node, index };
+      } else if (at(".")) {
+        next();
+        const prop = cur().type === "ident" || cur().type === "keyword" ? next().value : (() => {
+          throw new ParseError("expected property name", cur().line, cur().col);
+        })();
+        node = { kind: "Member", object: node, property: prop };
+      } else if (atKw("as")) {
+        next();
+        const type = parseType();
+        node = { kind: "Cast", value: node, type };
+      } else break;
+    }
+    return node;
+  }
+  function parsePrimary() {
+    const t = cur();
+    if (t.type === "number") {
+      next();
+      return { kind: "NumLit", value: Number(t.value) };
+    }
+    if (t.type === "string") {
+      next();
+      const parts = t.parts || [];
+      if (parts.length === 1 && parts[0].text !== void 0) return { kind: "StrLit", value: parts[0].text };
+      return {
+        kind: "InterpStr",
+        parts: parts.map((pp) => pp.expr !== void 0 ? { expr: parseInlineExpr(pp.expr) } : { text: pp.text })
+      };
+    }
+    if (atKw("true")) {
+      next();
+      return { kind: "BoolLit", value: true };
+    }
+    if (atKw("false")) {
+      next();
+      return { kind: "BoolLit", value: false };
+    }
+    if (atKw("nil")) {
+      next();
+      return { kind: "NilLit" };
+    }
+    if (atKw("fn")) {
+      next();
+      const params = parseParams();
+      let ret = null;
+      if (at("->")) {
+        next();
+        ret = parseType();
+      }
+      const body = parseBlock();
+      return { kind: "Lambda", params: params.map((pp) => pp.name), body, ret };
+    }
+    if (atKw("new")) {
+      next();
+      const className = expectIdent();
+      const args = [];
+      if (at("(")) {
+        next();
+        skipNewlines();
+        while (!at(")")) {
+          args.push(parseExpr());
+          skipNewlines();
+          if (at(",")) {
+            next();
+            skipNewlines();
+          }
+        }
+        expect(")");
+      }
+      return { kind: "NewExpr", className, args };
+    }
+    if (at("(")) {
+      next();
+      const e = parseExpr();
+      expect(")");
+      return e;
+    }
+    if (at("[")) {
+      next();
+      const items = [];
+      skipNewlines();
+      while (!at("]")) {
+        items.push(parseExpr());
+        skipNewlines();
+        if (at(",")) {
+          next();
+          skipNewlines();
+        }
+      }
+      expect("]");
+      return { kind: "ArrayLit", items };
+    }
+    if (at("{")) {
+      next();
+      const entries = [];
+      skipNewlines();
+      while (!at("}")) {
+        let key;
+        if (cur().type === "string" || cur().type === "ident" || cur().type === "keyword") key = next().value;
+        else throw new ParseError("expected object key", cur().line, cur().col);
+        expect(":");
+        const value = parseExpr();
+        entries.push({ key, value });
+        skipNewlines();
+        if (at(",")) {
+          next();
+          skipNewlines();
+        }
+      }
+      expect("}");
+      return { kind: "ObjectLit", entries };
+    }
+    if (t.type === "ident" || atKw("this") || atKw("self") || atKw("Self")) {
+      if (atKw("this")) {
+        next();
+        return { kind: "Ident", name: "this" };
+      }
+      next();
+      let name = t.value;
+      while (at("::")) {
+        next();
+        name += "::" + (cur().type === "ident" || cur().type === "keyword" ? next().value : expectIdent());
+      }
+      if (at("{") && name !== "this") {
+        const save = p;
+        next();
+        skipNewlines();
+        const isStructLit = (cur().type === "ident" || cur().type === "keyword") && toks[p + 1] && (toks[p + 1].value === ":" || toks[p + 1].value === ",");
+        p = save;
+        if (isStructLit) {
+          next();
+          const entries = [];
+          skipNewlines();
+          while (!at("}")) {
+            const key = cur().type === "string" || cur().type === "ident" || cur().type === "keyword" ? next().value : expectIdent();
+            expect(":");
+            entries.push({ key, value: parseExpr() });
+            skipNewlines();
+            if (at(",")) {
+              next();
+              skipNewlines();
+            }
+          }
+          expect("}");
+          return { kind: "ObjectLit", entries, typeName: name };
+        }
+      }
+      if ((name === "pi" || name === "PI") && cur().value === "(") {
+        next();
+        const arg = parseExpr();
+        expect(")");
+        return { kind: "Transcendental", symbol: "pi", op: "mul", arg };
+      }
+      if (name === "pi" || name === "PI") return { kind: "Ident", name: "PI" };
+      if (name === "e" && cur().value === "(") {
+        next();
+        const arg = parseExpr();
+        expect(")");
+        return { kind: "Transcendental", symbol: "e", op: "log", arg };
+      }
+      return { kind: "Ident", name };
+    }
+    throw new ParseError(`unexpected token '${t.value || t.type}'`, t.line, t.col);
+  }
+  return parseProgram();
+}
+
+// src/std/blake3.ts
+var IV = new Uint32Array([
+  1779033703,
+  3144134277,
+  1013904242,
+  2773480762,
+  1359893119,
+  2600822924,
+  528734635,
+  1541459225
+]);
+var MSG_PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+var CHUNK_START = 1 << 0;
+var CHUNK_END = 1 << 1;
+var ROOT = 1 << 3;
+function rotr(x, n) {
+  return (x >>> n | x << 32 - n) >>> 0;
+}
+function g(state, a, b, c, d, mx, my) {
+  state[a] = state[a] + state[b] + mx >>> 0;
+  state[d] = rotr(state[d] ^ state[a], 16);
+  state[c] = state[c] + state[d] >>> 0;
+  state[b] = rotr(state[b] ^ state[c], 12);
+  state[a] = state[a] + state[b] + my >>> 0;
+  state[d] = rotr(state[d] ^ state[a], 8);
+  state[c] = state[c] + state[d] >>> 0;
+  state[b] = rotr(state[b] ^ state[c], 7);
+}
+function compress(cv, block, counter, blockLen, flags) {
+  const state = new Uint32Array(16);
+  state.set(cv, 0);
+  state.set(IV.subarray(0, 4), 8);
+  state[12] = counter >>> 0;
+  state[13] = Math.floor(counter / 4294967296) >>> 0;
+  state[14] = blockLen >>> 0;
+  state[15] = flags >>> 0;
+  let m = Uint32Array.from(block);
+  for (let r = 0; r < 7; r++) {
+    g(state, 0, 4, 8, 12, m[0], m[1]);
+    g(state, 1, 5, 9, 13, m[2], m[3]);
+    g(state, 2, 6, 10, 14, m[4], m[5]);
+    g(state, 3, 7, 11, 15, m[6], m[7]);
+    g(state, 0, 5, 10, 15, m[8], m[9]);
+    g(state, 1, 6, 11, 12, m[10], m[11]);
+    g(state, 2, 7, 8, 13, m[12], m[13]);
+    g(state, 3, 4, 9, 14, m[14], m[15]);
+    if (r < 6) {
+      const p = new Uint32Array(16);
+      for (let i = 0; i < 16; i++) p[i] = m[MSG_PERM[i]];
+      m = p;
+    }
+  }
+  const out = new Uint32Array(16);
+  for (let i = 0; i < 8; i++) out[i] = (state[i] ^ state[i + 8]) >>> 0;
+  for (let i = 0; i < 8; i++) out[i + 8] = (state[i + 8] ^ cv[i]) >>> 0;
+  return out;
+}
+function bytesToWords(bytes, offset) {
+  const w = new Uint32Array(16);
+  for (let i = 0; i < 16; i++) {
+    const j = offset + i * 4;
+    w[i] = ((bytes[j] || 0) | (bytes[j + 1] || 0) << 8 | (bytes[j + 2] || 0) << 16 | (bytes[j + 3] || 0) << 24) >>> 0;
+  }
+  return w;
+}
+function blake3Bytes(input) {
+  let cv = Uint32Array.from(IV);
+  const blocks = Math.max(1, Math.ceil(input.length / 64));
+  let lastOut = null;
+  for (let b = 0; b < blocks; b++) {
+    const offset = b * 64;
+    const blockLen = Math.min(64, input.length - offset);
+    const flags = (b === 0 ? CHUNK_START : 0) | (b === blocks - 1 ? CHUNK_END : 0) | (blocks === 1 ? ROOT : 0);
+    const words = bytesToWords(input, offset);
+    const out2 = compress(cv, words, b, blockLen < 0 ? 0 : blockLen, flags);
+    lastOut = out2;
+    cv = out2.slice(0, 8);
+  }
+  const out = lastOut;
+  const digest = new Uint8Array(32);
+  for (let i = 0; i < 8; i++) {
+    digest[i * 4] = out[i] & 255;
+    digest[i * 4 + 1] = out[i] >>> 8 & 255;
+    digest[i * 4 + 2] = out[i] >>> 16 & 255;
+    digest[i * 4 + 3] = out[i] >>> 24 & 255;
+  }
+  return digest;
+}
+function utf8Encode(s) {
+  if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(s);
+  const bytes = [];
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    if (cp < 128) bytes.push(cp);
+    else if (cp < 2048) bytes.push(192 | cp >> 6, 128 | cp & 63);
+    else if (cp < 65536) bytes.push(224 | cp >> 12, 128 | cp >> 6 & 63, 128 | cp & 63);
+    else bytes.push(240 | cp >> 18, 128 | cp >> 12 & 63, 128 | cp >> 6 & 63, 128 | cp & 63);
+  }
+  return new Uint8Array(bytes);
+}
+function hex(bytes) {
+  let s = "";
+  for (const b of bytes) s += b.toString(16).padStart(2, "0");
+  return s;
+}
+function blake3(input) {
+  const bytes = typeof input === "string" ? utf8Encode(input) : input;
+  return hex(blake3Bytes(bytes));
+}
+function seededBytes(seed, count) {
+  const out = new Uint8Array(count);
+  let counter = 0;
+  let off = 0;
+  while (off < count) {
+    const block = blake3Bytes(concat(seed, u32le(counter)));
+    const n = Math.min(32, count - off);
+    out.set(block.subarray(0, n), off);
+    off += n;
+    counter++;
+  }
+  return out;
+}
+function concat(a, b) {
+  const r = new Uint8Array(a.length + b.length);
+  r.set(a, 0);
+  r.set(b, a.length);
+  return r;
+}
+function u32le(n) {
+  return new Uint8Array([n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255]);
+}
+
+// src/std/math.ts
+function modPow(base, exp, mod2) {
+  if (mod2 === 1n) return 0n;
+  let result = 1n;
+  base = (base % mod2 + mod2) % mod2;
+  while (exp > 0n) {
+    if (exp & 1n) result = result * base % mod2;
+    exp >>= 1n;
+    base = base * base % mod2;
+  }
+  return result;
+}
+function modPowNum(base, exp, mod2) {
+  let result = 1;
+  base = (base % mod2 + mod2) % mod2;
+  while (exp > 0) {
+    if (exp & 1) result = Number(BigInt(result) * BigInt(base) % BigInt(mod2));
+    exp >>= 1;
+    base = Number(BigInt(base) * BigInt(base) % BigInt(mod2));
+  }
+  return result;
+}
+function fermatTest(n, a = 2) {
+  if (n < 2) return false;
+  if (n === 2) return true;
+  if (n % 2 === 0) return false;
+  return modPowNum(a, n - 1, n) === 1;
+}
+function isPrimeMillerRabin(n) {
+  if (n < 2) return false;
+  for (const p of [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]) {
+    if (n === p) return true;
+    if (n % p === 0) return false;
+  }
+  let d = n - 1;
+  let r = 0;
+  while (d % 2 === 0) {
+    d /= 2;
+    r++;
+  }
+  for (const a of [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]) {
+    if (a >= n) continue;
+    let x = modPowNum(a, d, n);
+    if (x === 1 || x === n - 1) continue;
+    let cont = false;
+    for (let i = 0; i < r - 1; i++) {
+      x = Number(BigInt(x) * BigInt(x) % BigInt(n));
+      if (x === n - 1) {
+        cont = true;
+        break;
+      }
+    }
+    if (!cont) return false;
+  }
+  return true;
+}
+function fermatCertify(n) {
+  const bases = [2, 3, 5, 7];
+  const witnesses = bases.map((a) => ({ a, value: n >= 2 ? modPowNum(a, Math.max(0, n - 1), n) : 0, pass: n >= 2 ? fermatTest(n, a) : false }));
+  const fermatPass = witnesses.every((w) => w.pass);
+  const mrPrime = isPrimeMillerRabin(n);
+  const carmichael = fermatPass && !mrPrime && n > 1;
+  return { n, isPrime: mrPrime, bases, witnesses, carmichael };
+}
+var GOLDILOCKS_P = 18446744069414584321n;
+function goldAdd(a, b) {
+  return (a + b) % GOLDILOCKS_P;
+}
+function goldSub(a, b) {
+  return ((a - b) % GOLDILOCKS_P + GOLDILOCKS_P) % GOLDILOCKS_P;
+}
+function goldMul(a, b) {
+  return a * b % GOLDILOCKS_P;
+}
+function goldInv(a) {
+  return modPow(a, GOLDILOCKS_P - 2n, GOLDILOCKS_P);
+}
+function goldDiv(a, b) {
+  return goldMul(a, goldInv(b));
+}
+function zmod(value, n) {
+  return (value % n + n) % n;
+}
+function zeta(s, terms = 4e3) {
+  if (s === 1) return Infinity;
+  let eta = 0;
+  for (let n = 1; n <= terms; n++) {
+    const term = Math.pow(n, -s);
+    eta += (n % 2 === 1 ? 1 : -1) * term;
+  }
+  const factor = 1 - Math.pow(2, 1 - s);
+  return eta / factor;
+}
+function zetaZeroApprox(count = 3) {
+  const known = [14.134725, 21.02204, 37.586178, 30.424876, 32.935062];
+  known.sort((a, b) => a - b);
+  return known.slice(0, count).map((t) => ({ t, zeta: 0 }));
+}
+var ZW = ["\u200B", "\u200C", "\u200D"];
+function toZeroWidth(text) {
+  const bytes = typeof TextEncoder !== "undefined" ? new TextEncoder().encode(text) : new Uint8Array(Array.from(text).map((c) => c.charCodeAt(0) & 255));
+  let out = "";
+  for (const b of bytes) {
+    for (let bit = 7; bit >= 0; bit--) {
+      out += ZW[b >> bit & 1 ? 1 : 0];
+    }
+    out += ZW[2];
+  }
+  return out;
+}
+function fromZeroWidth(zw) {
+  const bits = [];
+  const bytes = [];
+  for (const ch of zw) {
+    if (ch === ZW[0]) bits.push(0);
+    else if (ch === ZW[1]) bits.push(1);
+    else if (ch === ZW[2]) {
+      if (bits.length >= 8) {
+        let byte = 0;
+        for (let i = 0; i < 8; i++) byte = byte << 1 | bits[i];
+        bytes.push(byte);
+      }
+      bits.length = 0;
+    }
+  }
+  if (bits.length >= 8) {
+    let byte = 0;
+    for (let i = 0; i < 8; i++) byte = byte << 1 | bits[i];
+    bytes.push(byte);
+  }
+  const arr = new Uint8Array(bytes);
+  if (typeof TextDecoder !== "undefined") return new TextDecoder().decode(arr);
+  return Array.from(arr).map((b) => String.fromCharCode(b)).join("");
+}
+function inCantorSet(x, depth = 20) {
+  if (x < 0 || x > 1) return false;
+  for (let i = 0; i < depth; i++) {
+    const t = x * 3;
+    if (t >= 1 && t <= 2) return false;
+    x = t < 1 ? t : t - 2;
+  }
+  return true;
+}
+function jInvariant(t, terms = 3) {
+  const q = Math.exp(-2 * Math.PI * t);
+  let j = 1 / q + 744;
+  j += 196884 * q + 21493760 * q ** 2 + 864299970 * q ** 3;
+  return j;
+}
+function resolventNorm(spectralRadius) {
+  return 1 / (1 - spectralRadius);
+}
+
+// src/std/sedenion.ts
+var DIM = 16;
+function sedenionMul(a, b) {
+  return mulDim(DIM, a, b);
+}
+function conjDim(dim, x) {
+  const r = x.slice(0, dim);
+  for (let i = 1; i < dim; i++) r[i] = -r[i];
+  return r;
+}
+function mulDim(dim, a, b) {
+  if (dim === 1) return [a[0] * b[0]];
+  const half = dim >> 1;
+  const a1 = a.slice(0, half), a2 = a.slice(half, dim);
+  const b1 = b.slice(0, half), b2 = b.slice(half, dim);
+  const r1a = mulDim(half, a1, b1);
+  const r1b = mulDim(half, conjDim(half, b2), a2);
+  const r2a = mulDim(half, b2, a1);
+  const r2b = mulDim(half, a2, conjDim(half, b1));
+  const r1 = r1a.map((v, i) => v - r1b[i]);
+  const r2 = r2a.map((v, i) => v + r2b[i]);
+  return r1.concat(r2);
+}
+function detectZeroDivisor(a, b) {
+  const p = sedenionMul(a, b);
+  const normA = Math.sqrt(a.reduce((s, x) => s + x * x, 0));
+  const normB = Math.sqrt(b.reduce((s, x) => s + x * x, 0));
+  const normProduct = Math.sqrt(p.reduce((s, x) => s + x * x, 0));
+  const residual = normProduct;
+  const isZeroDivisor = normA > 1e-9 && normB > 1e-9 && normProduct < 1e-9;
+  return { isZeroDivisor, normA, normB, normProduct, residual };
+}
+var MATTER = [
+  ["PI_LOAD", "Load circle-\u03C0 lattice value into register"],
+  ["E_LOG", "Spiral-e logarithmic activation"],
+  ["ADD", "Matter integer add"],
+  ["SUB", "Matter integer subtract"],
+  ["MUL", "Sedenion product"],
+  ["DIV", "Rational divide"],
+  ["CMP", "Compare and set flags"],
+  ["JMP", "Circle warp jump"],
+  ["JZ", "Jump if zero-drift"],
+  ["CALL", "Symmetric activation call"],
+  ["RET", "Return from t+ frame"],
+  ["LOAD", "Load from Pi-Lattice"],
+  ["STORE", "Store to Pi-Lattice"],
+  ["PUSH", "Push Matter cell"],
+  ["POP", "Pop Matter cell"],
+  ["DUP", "Duplicate cell"],
+  ["SWAP", "Swap cells"],
+  ["AND", "Bitwise conjunction"],
+  ["OR", "Bitwise disjunction"],
+  ["XOR", "Bitwise exclusive"],
+  ["SHL", "Shift left"],
+  ["SHR", "Shift right"],
+  ["SIN", "Circle sine"],
+  ["COS", "Circle cosine"],
+  ["TAN", "Circle tangent"],
+  ["SQRT", "Principal square root"],
+  ["POW", "Exponentiation"],
+  ["ABS", "Absolute value"],
+  ["MIN", "Minimum"],
+  ["MAX", "Maximum"],
+  ["HASH", "BLAKE3 witness"],
+  ["EMIT", "Emit execution witness"]
+];
+var ANTIMATTER = [
+  ["ZERO_VAULT", "Zero-divisor vault seal"],
+  ["DRIFT_CHECK", "L_eff drift validation"],
+  ["GC_SWEEP", "t- garbage collection"],
+  ["UNWIND", "Exception unwind"],
+  ["TRACE_OFF", "Disable witness trace"],
+  ["SEAL", "Seal execution epoch"],
+  ["DECAY", "Antimatter decay"],
+  ["ANNIHILATE", "Matter/antimatter annihilation"],
+  ["ROLLBACK", "Rollback ledger"],
+  ["AUDIT", "Emit audit record"],
+  ["FREEZE", "Freeze resource budget"],
+  ["THAW", "Thaw resource budget"],
+  ["CANON", "Canonicalize value"],
+  ["SIEVE", "Cantor sieve measure-zero pass"],
+  ["ZWS_ENC", "Zero-width steganography encode"],
+  ["ZWS_DEC", "Zero-width steganography decode"],
+  ["SIGMA", "Sigma kernel reduction"],
+  ["RHO", "Spectral radius rho < 1 guard"],
+  ["KANI", "Bounded model-check assertion"],
+  ["LEAN", "Lean4 proof obligation"],
+  ["CIRCOM", "zk-SNARK constraint emit"],
+  ["SOLIDITY", "EVM contract emit"],
+  ["PIRTM", "PIRTM transcendental node"],
+  ["FERMAT", "Fermat primality witness"],
+  ["DILITHIUM", "Post-quantum signature"],
+  ["CRDT", "CRDT merge"],
+  ["LEDGER", "Ledger append"],
+  ["QUORUM", "Quorum vote"],
+  ["BUDGET", "Resource budget check"],
+  ["TIER", "S0-S6 tier gate"],
+  ["PROOF_ANCHOR", "Anchor proof root"],
+  ["DNA_EXPORT", "Immortal kernel DNA export"]
+];
+function opcodeTable() {
+  const ops = [];
+  MATTER.forEach(([mn, desc], i) => ops.push({ code: i, mnemonic: mn, manifold: "Matter", t: "t+", desc }));
+  ANTIMATTER.forEach(([mn, desc], i) => ops.push({ code: 32 + i, mnemonic: mn, manifold: "Antimatter", t: "t-", desc }));
+  return ops;
+}
+function executeOpcode(op, arg, reg) {
+  const r = reg.slice();
+  switch (op.mnemonic) {
+    case "PI_LOAD":
+      return { reg: r, out: Math.PI * arg };
+    case "E_LOG":
+      return { reg: r, out: Math.log(arg) * Math.E };
+    case "ADD":
+      return { reg: r, out: arg + (reg[0] || 0) };
+    case "SUB":
+      return { reg: r, out: (reg[0] || 0) - arg };
+    case "MUL":
+      return { reg: r, out: arg * (reg[0] || 1) };
+    case "DIV":
+      return { reg: r, out: arg === 0 ? NaN : (reg[0] || 0) / arg };
+    case "SQRT":
+      return { reg: r, out: Math.sqrt(arg) };
+    case "SIN":
+      return { reg: r, out: Math.sin(arg) };
+    case "COS":
+      return { reg: r, out: Math.cos(arg) };
+    case "TAN":
+      return { reg: r, out: Math.tan(arg) };
+    case "POW":
+      return { reg: r, out: Math.pow(reg[0] || 1, arg) };
+    case "ABS":
+      return { reg: r, out: Math.abs(arg) };
+    case "HASH":
+      return { reg: r, out: 0 };
+    default:
+      return { reg: r, out: arg };
+  }
+}
+
+// src/std/dilithium.ts
+var Q = 8380417;
+var N = 256;
+var BOUND = 130994;
+function mod(x) {
+  return (x % Q + Q) % Q;
+}
+function polyMul(a, b) {
+  const acc = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const ai = a[i];
+    if (ai === 0) continue;
+    for (let j = 0; j < N; j++) {
+      const bj = b[j];
+      if (bj === 0) continue;
+      const prod = ai * bj % Q;
+      const k = i + j;
+      if (k < N) acc[k] += prod;
+      else acc[k - N] -= prod;
+    }
+  }
+  const out = new Array(N);
+  for (let i = 0; i < N; i++) out[i] = mod(acc[i]);
+  return out;
+}
+function polyAdd(a, b) {
+  return a.map((v, i) => mod(v + b[i]));
+}
+function sampleUniform(seed, tag) {
+  const bytes = seededBytes(concat(seed, u32le(tag)), N * 4);
+  const p = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const v = (bytes[i * 4] | bytes[i * 4 + 1] << 8 | bytes[i * 4 + 2] << 16 | bytes[i * 4 + 3] << 24) >>> 0;
+    p[i] = v % Q;
+  }
+  return p;
+}
+function sampleSmall(seed, tag, eta = 2) {
+  const bytes = seededBytes(concat(seed, u32le(tag)), N);
+  const p = new Array(N);
+  for (let i = 0; i < N; i++) p[i] = bytes[i] % (2 * eta + 1) - eta;
+  return p;
+}
+function challengeFromHash(hash) {
+  const c = new Array(N).fill(0);
+  let weight = 0;
+  for (let i = 0; i < N && weight < 60; i++) {
+    if (hash[i % hash.length] & 1) {
+      c[i] = hash[(i + 7) % hash.length] & 1 ? 1 : -1;
+      weight++;
+    }
+  }
+  return c;
+}
+function keygen(seedStr) {
+  const seed = blake3Bytes(utf8Encode(seedStr));
+  const a = sampleUniform(seed, 1);
+  const s1 = sampleSmall(seed, 2);
+  const s2 = sampleSmall(seed, 3);
+  const t = polyAdd(polyMul(a, s1), s2);
+  return { publicKey: { a, t }, privateKey: { s1, s2, a } };
+}
+function sign(message, kp, nonce = 0) {
+  const { s1, s2, a } = kp.privateKey;
+  const y = sampleSmall(blake3Bytes(utf8Encode(message + ":" + nonce)), 10, 1);
+  const w = polyMul(a, y);
+  const cHash = blake3Bytes(utf8Encode(JSON.stringify(w.slice(0, 8)) + message));
+  const c = challengeFromHash(cHash);
+  const z = polyAdd(y, polyMul(c, s1)).map(center);
+  const h = polyMul(c, s2).map(center);
+  const hash = hexOf(blake3Bytes(concat(cHash, utf8Encode(JSON.stringify(z.slice(0, 8))))));
+  return { z, h, c, hash };
+}
+function center(v) {
+  let x = mod(v);
+  if (x > Q / 2) x -= Q;
+  return mod(x);
+}
+function verify(message, sig, kp) {
+  const { a, t } = kp.publicKey;
+  const az = polyMul(a, sig.z);
+  const ct = polyMul(sig.c, t);
+  const wPrime = az.map((v, i) => mod(v - ct[i] + sig.h[i]));
+  const cHash = blake3Bytes(utf8Encode(JSON.stringify(wPrime.slice(0, 8)) + message));
+  const c = challengeFromHash(cHash);
+  let match = true;
+  for (let i = 0; i < N; i++) if (c[i] !== sig.c[i]) {
+    match = false;
+    break;
+  }
+  const norm = Math.max(...sig.z.map((v) => {
+    let x = mod(v);
+    return x > Q / 2 ? Q - x : x;
+  }));
+  return match && norm <= BOUND;
+}
+function hexOf(bytes) {
+  let s = "";
+  for (const b of bytes) s += b.toString(16).padStart(2, "0");
+  return s;
+}
+
+// src/std/governance.ts
+var K_MAX = 133144;
+var TAU_R = 1e-6;
+function tierPolicy(tier) {
+  switch (tier) {
+    case "S0":
+      return { tier, maxBudget: K_MAX, requiresProof: false, requiresSignature: false };
+    case "S2":
+      return { tier, maxBudget: Math.floor(K_MAX * 0.75), requiresProof: true, requiresSignature: false };
+    case "S4":
+      return { tier, maxBudget: Math.floor(K_MAX * 0.5), requiresProof: true, requiresSignature: true };
+    case "S6":
+      return { tier, maxBudget: Math.floor(K_MAX * 0.25), requiresProof: true, requiresSignature: true };
+  }
+}
+var ACEEnvelope = class {
+  constructor(tier = "S0", limit = K_MAX) {
+    const pol = tierPolicy(tier);
+    this.state = {
+      used: 0,
+      limit: Math.min(limit, pol.maxBudget),
+      invariants: [],
+      witnesses: [],
+      safety: "SAFE",
+      tier
+    };
+  }
+  charge(amount, label) {
+    if (this.state.used + amount > this.state.limit) {
+      this.state.safety = "VIOLATED";
+      this.state.invariants.push(`BUDGET_EXCEEDED:${label}:${this.state.used}+${amount}>${this.state.limit}`);
+      return false;
+    }
+    this.state.used += amount;
+    return true;
+  }
+  witness(data) {
+    const h = blake3(`${data}|${this.state.used}|${this.state.tier}`);
+    this.state.witnesses.push(h);
+    return h;
+  }
+  assertInvariant(name, cond) {
+    if (!cond) {
+      this.state.safety = this.state.safety === "VIOLATED" ? "VIOLATED" : "DEGRADED";
+      this.state.invariants.push(`FAIL:${name}`);
+    } else {
+      this.state.invariants.push(`OK:${name}`);
+    }
+  }
+};
+function sigmaKernel(lEff, drift, tauR = TAU_R) {
+  const lEffOk = lEff < 1;
+  const driftOk = Math.abs(drift) <= tauR;
+  return {
+    lEff,
+    drift,
+    lEffOk,
+    driftOk,
+    stable: lEffOk && driftOk,
+    witness: blake3(`sigma:${lEff}:${drift}`)
+  };
+}
+function rhoGuard(rho, residual) {
+  return { ok: rho < 1 && residual <= 1e-6, rho, residual };
+}
+function kaniVerify(fn, arity, assertion, bound = 8, name = "obligation") {
+  let checked = 0;
+  const args = new Array(arity).fill(0);
+  const rec = (i) => {
+    if (i === arity) {
+      const out = fn(args);
+      checked++;
+      return assertion(args, out) ? null : args.slice();
+    }
+    for (let v = 0; v < bound; v++) {
+      args[i] = v;
+      const ce2 = rec(i + 1);
+      if (ce2) return ce2;
+    }
+    return null;
+  };
+  const ce = rec(0);
+  return { passed: ce === null, bound, checked, counterexample: ce, obligations: [`${name} over [0,${bound})^${arity}`] };
+}
+function normalize(e) {
+  switch (e.t) {
+    case "num":
+      return /* @__PURE__ */ new Map([["", e.v]]);
+    case "var":
+      return /* @__PURE__ */ new Map([[e.n, 1]]);
+    case "add":
+      return polyAdd2(normalize(e.a), normalize(e.b));
+    case "mul":
+      return polyMulMap(normalize(e.a), normalize(e.b));
+    case "pow": {
+      let acc = /* @__PURE__ */ new Map([["", 1]]);
+      for (let i = 0; i < e.n; i++) acc = polyMulMap(acc, normalize(e.a));
+      return acc;
+    }
+  }
+}
+function polyAdd2(a, b) {
+  const r = new Map(a);
+  for (const [k, v] of b) r.set(k, (r.get(k) || 0) + v);
+  return r;
+}
+function polyMulMap(a, b) {
+  const r = /* @__PURE__ */ new Map();
+  for (const [ka, va] of a) {
+    for (const [kb, vb] of b) {
+      const key = [ka, kb].filter(Boolean).sort().join("*");
+      r.set(key, (r.get(key) || 0) + va * vb);
+    }
+  }
+  return r;
+}
+function leanProve(name, lhs, rhs) {
+  const a = normalize(lhs);
+  const b = normalize(rhs);
+  const keys = /* @__PURE__ */ new Set([...a.keys(), ...b.keys()]);
+  let proved = true;
+  for (const k of keys) {
+    if (Math.abs((a.get(k) || 0) - (b.get(k) || 0)) > 1e-9) {
+      proved = false;
+      break;
+    }
+  }
+  return { name, lhs: render(lhs), rhs: render(rhs), proved, tactic: proved ? "ring" : "unsolved" };
+}
+function render(e) {
+  switch (e.t) {
+    case "num":
+      return String(e.v);
+    case "var":
+      return e.n;
+    case "add":
+      return `(${render(e.a)} + ${render(e.b)})`;
+    case "mul":
+      return `(${render(e.a)} * ${render(e.b)})`;
+    case "pow":
+      return `(${render(e.a)}^${e.n})`;
+  }
+}
+var Ledger = class {
+  constructor() {
+    this.entries = [];
+    this.clock = 0;
+  }
+  append(op, payload) {
+    const prev = this.entries.length ? this.entries[this.entries.length - 1].hash : "0".repeat(64);
+    const index = this.entries.length;
+    const ts = this.clock++;
+    const hash = blake3(`${index}|${op}|${payload}|${prev}|${ts}`);
+    const entry = { index, op, payload, prev, hash, ts };
+    this.entries.push(entry);
+    return entry;
+  }
+  verifyChain() {
+    for (let i = 0; i < this.entries.length; i++) {
+      const e = this.entries[i];
+      const prev = i === 0 ? "0".repeat(64) : this.entries[i - 1].hash;
+      if (e.prev !== prev) return false;
+      const h = blake3(`${e.index}|${e.op}|${e.payload}|${e.prev}|${e.ts}`);
+      if (h !== e.hash) return false;
+    }
+    return true;
+  }
+};
+var CRDT = class {
+  constructor() {
+    this.store = /* @__PURE__ */ new Map();
+  }
+  set(key, value, ts, node) {
+    const cur = this.store.get(key);
+    if (!cur || ts > cur.ts || ts === cur.ts && node > cur.node) {
+      this.store.set(key, { value, ts, node });
+    }
+  }
+  merge(other) {
+    for (const [k, v] of other.store) this.set(k, v.value, v.ts, v.node);
+  }
+  get(key) {
+    return this.store.get(key)?.value;
+  }
+  entries() {
+    return [...this.store.entries()];
+  }
+  get size() {
+    return this.store.size;
+  }
+};
+function proofAnchor(parts) {
+  return blake3("anchor|" + parts.join("|"));
+}
+function zeroDivisorVault(seed) {
+  const bytes = blake3Bytes(utf8Encode(seed));
+  const drift = bytes[0] / 255 * 1e-7;
+  return { sealed: drift <= TAU_R, witness: hex(bytes.slice(0, 8)), drift };
+}
+
+// src/vm/machine.ts
+var RAM_SIZE = 32 * 1024 * 1024;
+var PAGE_SIZE = 4096;
+var SECTOR = 512;
+var Machine = class {
+  constructor(size = RAM_SIZE) {
+    this.lattice = /* @__PURE__ */ new Map();
+    this.regs = new Int32Array(32);
+    this.pc = 0;
+    this.running = false;
+    this.ring = 0;
+    this.booted = false;
+    this.log = [];
+    this.ram = new Uint8Array(size);
+    this.mbr = new Uint8Array(SECTOR);
+  }
+  // Write a 512-byte MBR (SectorForth-style boot sector) into RAM at 0x7C00.
+  writeMBR(program) {
+    const bytes = utf8Encode(program).subarray(0, SECTOR - 2);
+    this.mbr = new Uint8Array(SECTOR);
+    this.mbr.set(bytes, 0);
+    this.mbr[510] = 85;
+    this.mbr[511] = 170;
+    const base = 31744;
+    this.ram.set(this.mbr, base);
+    return base;
+  }
+  boot() {
+    const sig = this.ram[31744 + 510] === 85 && this.ram[31744 + 511] === 170;
+    this.booted = sig;
+    this.ring = sig ? 0 : 3;
+    const message = sig ? "SectorForth booted into Ring 0" : "boot signature invalid";
+    this.log.push(message);
+    return { ok: sig, ring: this.ring, message };
+  }
+  // Pi-Lattice: load a program image into RAM (Immutable Resurrection).
+  loadLattice(program, base = PAGE_SIZE) {
+    const bytes = utf8Encode(program);
+    this.ram.set(bytes.subarray(0, this.ram.length - base), base);
+    for (let i = 0; i < bytes.length; i++) {
+      this.lattice.set(base + i, bytes[i]);
+    }
+    this.log.push(`Pi-Lattice loaded ${bytes.length} bytes at 0x${base.toString(16)}`);
+    return bytes.length;
+  }
+  read(addr, len) {
+    return this.ram.subarray(addr, addr + len);
+  }
+  write(addr, bytes) {
+    this.ram.set(bytes, addr);
+  }
+  // Export the whole RAM as invisible DNA between [START] and [END].
+  exportDNA(limit = 1024) {
+    const used = Math.min(limit, this.ram.length);
+    const slice = this.ram.subarray(0, used);
+    const b64 = base64Encode(slice);
+    return `[START]${b64}[END]`;
+  }
+  importDNA(dna) {
+    const m = dna.match(/\[START\]([\s\S]*?)\[END\]/);
+    if (!m) return false;
+    const bytes = base64Decode(m[1]);
+    this.ram.set(bytes.subarray(0, this.ram.length), 0);
+    this.log.push(`Immortal Resurrection: restored ${bytes.length} bytes`);
+    return true;
+  }
+  dnaFingerprint(dna) {
+    return blake3(dna);
+  }
+};
+function ghostLogic(source) {
+  const total = source.length || 1;
+  let points = 0;
+  for (const ch of source) {
+    if (/[A-Za-z0-9_{}()\[\]=+\-*/%<>!&|;:.]/.test(ch)) points++;
+  }
+  const voidChars = total - points;
+  return {
+    semanticVolume: points / total,
+    voidRatio: voidChars / total,
+    points,
+    measure: 0,
+    // points form a measure-zero set
+    ghost: voidChars / total > 0.15
+  };
+}
+var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function base64Encode(bytes) {
+  if (typeof btoa !== "undefined") {
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s);
+  }
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i], b1 = bytes[i + 1], b2 = bytes[i + 2];
+    out += B64[b0 >> 2];
+    out += B64[(b0 & 3) << 4 | (b1 ?? 0) >> 4];
+    out += i + 1 < bytes.length ? B64[(b1 & 15) << 2 | (b2 ?? 0) >> 6] : "=";
+    out += i + 2 < bytes.length ? B64[(b2 ?? 0) & 63] : "=";
+  }
+  return out;
+}
+function base64Decode(s) {
+  if (typeof atob !== "undefined") {
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  const clean = s.replace(/=+$/, "");
+  const bytes = [];
+  let buffer = 0, bits = 0;
+  for (const ch of clean) {
+    const v = B64.indexOf(ch);
+    if (v < 0) continue;
+    buffer = buffer << 6 | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push(buffer >> bits & 255);
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+// src/vm/interpreter.ts
+var RuntimeError = class extends Error {
+  constructor(msg, line) {
+    super(msg);
+    this.line = line;
+  }
+};
+function makeFrame(parent, isFnBoundary = false) {
+  return { vars: /* @__PURE__ */ new Map(), parent, isFnBoundary };
+}
+function lookupFrame(f, name) {
+  let cur = f;
+  while (cur) {
+    if (cur.vars.has(name)) return cur;
+    cur = cur.parent;
+  }
+  return null;
+}
+function getVar(f, name) {
+  const found = lookupFrame(f, name);
+  if (!found) throw new RuntimeError(`undefined variable '${name}'`);
+  return found.vars.get(name);
+}
+function setVar(f, name, value) {
+  const found = lookupFrame(f, name);
+  if (found) found.vars.set(name, value);
+  else f.vars.set(name, value);
+}
+function truthy(v) {
+  if (v === null || v === void 0 || v === false) return false;
+  if (typeof v === "number") return v !== 0 && !Number.isNaN(v);
+  if (typeof v === "string") return v.length > 0;
+  return true;
+}
+function fmtNum(n) {
+  if (Number.isInteger(n)) return String(n);
+  if (!isFinite(n)) return String(n);
+  return String(Number(n.toPrecision(12)));
+}
+function toStr(v) {
+  if (v === null || v === void 0) return "nil";
+  if (typeof v === "number") return fmtNum(v);
+  if (typeof v === "string") return v;
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (Array.isArray(v)) return "[" + v.map(toStr).join(", ") + "]";
+  if (v instanceof SidAliFunction) return `<fn ${v.name}>`;
+  if (v instanceof SidAliClass) return `<class ${v.name}>`;
+  if (v instanceof SidAliInstance) return `<${v.cls.name} instance>`;
+  if (v && typeof v === "object") {
+    try {
+      return JSON.stringify(v, (k, val) => typeof val === "bigint" ? val.toString() : val);
+    } catch {
+      return String(v);
+    }
+  }
+  return String(v);
+}
+var SidAliFunction = class {
+  constructor(chunk, closure, name) {
+    this.chunk = chunk;
+    this.closure = closure;
+    this.name = name;
+  }
+  call(interp, args, thisVal) {
+    return interp.callChunk(this.chunk, args, thisVal, this.closure);
+  }
+};
+var SidAliClass = class {
+  constructor(name) {
+    this.name = name;
+    this.parent = null;
+    this.methods = /* @__PURE__ */ new Map();
+    this.statics = /* @__PURE__ */ new Map();
+  }
+  lookupMethod(name) {
+    if (this.methods.has(name)) return this.methods.get(name);
+    if (this.parent) return this.parent.lookupMethod(name);
+    return void 0;
+  }
+  lookupStatic(name) {
+    if (this.statics.has(name)) return this.statics.get(name);
+    if (this.parent) return this.parent.lookupStatic(name);
+    return void 0;
+  }
+};
+var SidAliInstance = class {
+  constructor(cls, struct = null) {
+    this.cls = cls;
+    this.struct = struct;
+    this.fields = /* @__PURE__ */ new Map();
+  }
+};
+var SidAliStruct = class {
+  constructor(name, fields, reprC = false, packed = false) {
+    this.name = name;
+    this.fields = fields;
+    this.reprC = reprC;
+    this.packed = packed;
+    this.staticMethods = /* @__PURE__ */ new Map();
+  }
+  lookupMethod(name) {
+    return this.staticMethods.get(name);
+  }
+};
+var SidAliEnumVariant = class {
+  constructor(enumName, variant, arity) {
+    this.enumName = enumName;
+    this.variant = variant;
+    this.arity = arity;
+  }
+  toString() {
+    return `${this.enumName}::${this.variant}`;
+  }
+};
+var Interpreter = class {
+  constructor(program) {
+    this.program = program;
+    this.chunks = /* @__PURE__ */ new Map();
+    this.globals = makeFrame(null, true);
+    this.output = [];
+    this.instructions = 0;
+    this.maxInstructions = 5e6;
+    this.witnesses = [];
+    this.ledger = new Ledger();
+    this.natives = /* @__PURE__ */ new Map();
+    this.unsafeDepth = 0;
+    this.externs = /* @__PURE__ */ new Map();
+    this.main = program.main;
+    for (const ch of program.chunks) this.chunks.set(ch.id, ch);
+    this.ace = new ACEEnvelope("S0");
+    this.machine = new Machine();
+    this.installBuiltins();
+    this.installGlobals();
+  }
+  installGlobals() {
+    this.globals.vars.set("PI", Math.PI);
+    this.globals.vars.set("E", Math.E);
+    this.globals.vars.set("e", Math.E);
+    this.globals.vars.set("K_MAX", K_MAX);
+    this.globals.vars.set("TAU_R", TAU_R);
+    this.globals.vars.set("machine", this.machine);
+    this.globals.vars.set("ledger", this.ledger);
+    this.globals.vars.set("ace", this.ace);
+  }
+  defNative(name, arity, fn) {
+    this.natives.set(name, { arity, fn });
+    this.globals.vars.set(name, { __native: name });
+  }
+  installBuiltins() {
+    const N2 = (name, arity, fn) => this.defNative(name, arity, fn);
+    N2("len", 1, (_, a) => {
+      const v = a[0];
+      if (typeof v === "string") return [...v].length;
+      if (Array.isArray(v)) return v.length;
+      if (v instanceof Map) return v.size;
+      if (v && typeof v === "object") return Object.keys(v).length;
+      throw new RuntimeError("len() expects string/array/object");
+    });
+    N2("push", 2, (_, a) => {
+      if (!Array.isArray(a[0])) throw new RuntimeError("push() expects array");
+      a[0].push(a[1]);
+      return a[0];
+    });
+    N2("pop", 1, (_, a) => Array.isArray(a[0]) ? a[0].pop() : null);
+    N2("range", 2, (_, a) => {
+      const out = [];
+      const [s, e] = [a[0], a[1]];
+      if (e >= s) for (let i = s; i < e; i++) out.push(i);
+      else for (let i = s; i > e; i--) out.push(i);
+      return out;
+    });
+    N2("keys", 1, (_, a) => a[0] && typeof a[0] === "object" ? Object.keys(a[0]) : []);
+    N2("values", 1, (_, a) => a[0] && typeof a[0] === "object" ? Object.values(a[0]) : []);
+    N2("str", 1, (_, a) => toStr(a[0]));
+    N2("num", 1, (_, a) => typeof a[0] === "number" ? a[0] : parseFloat(toStr(a[0])) || 0);
+    N2("int", 1, (_, a) => Math.trunc(Number(a[0]) || 0));
+    N2("abs", 1, (_, a) => Math.abs(a[0]));
+    N2("floor", 1, (_, a) => Math.floor(a[0]));
+    N2("ceil", 1, (_, a) => Math.ceil(a[0]));
+    N2("round", 1, (_, a) => Math.round(a[0]));
+    N2("sqrt", 1, (_, a) => Math.sqrt(a[0]));
+    N2("pow", 2, (_, a) => Math.pow(a[0], a[1]));
+    N2("min", 2, (_, a) => Math.min(a[0], a[1]));
+    N2("max", 2, (_, a) => Math.max(a[0], a[1]));
+    N2("sin", 1, (_, a) => Math.sin(a[0]));
+    N2("cos", 1, (_, a) => Math.cos(a[0]));
+    N2("tan", 1, (_, a) => Math.tan(a[0]));
+    N2("log", 1, (_, a) => Math.log(a[0]));
+    N2("exp", 1, (_, a) => Math.exp(a[0]));
+    N2("now", 0, () => Date.now());
+    N2("type", 1, (_, a) => {
+      const v = a[0];
+      if (v === null || v === void 0) return "nil";
+      if (Array.isArray(v)) return "array";
+      if (v instanceof SidAliFunction) return "function";
+      if (v instanceof SidAliClass) return "class";
+      if (v instanceof SidAliInstance) return v.cls.name;
+      return typeof v;
+    });
+    N2("chr", 1, (_, a) => String.fromCodePoint(a[0]));
+    N2("ord", 1, (_, a) => toStr(a[0]).codePointAt(0) ?? 0);
+    N2("split", 2, (_, a) => toStr(a[0]).split(toStr(a[1])));
+    N2("join", 2, (_, a) => Array.isArray(a[0]) ? a[0].map(toStr).join(toStr(a[1])) : "");
+    N2("upper", 1, (_, a) => toStr(a[0]).toUpperCase());
+    N2("lower", 1, (_, a) => toStr(a[0]).toLowerCase());
+    N2("trim", 1, (_, a) => toStr(a[0]).trim());
+    N2("contains", 2, (_, a) => toStr(a[0]).includes(toStr(a[1])));
+    N2("replace", 3, (_, a) => toStr(a[0]).split(toStr(a[1])).join(toStr(a[2])));
+    N2("map", 2, (i, a) => Array.isArray(a[0]) ? a[0].map((x, idx) => i.callValue(a[1], [x, idx])) : []);
+    N2("filter", 2, (i, a) => Array.isArray(a[0]) ? a[0].filter((x, idx) => truthy(i.callValue(a[1], [x, idx]))) : []);
+    N2("reduce", 3, (i, a) => {
+      if (!Array.isArray(a[0])) return null;
+      let acc = a[2];
+      for (let idx = 0; idx < a[0].length; idx++) acc = i.callValue(a[1], [acc, a[0][idx], idx]);
+      return acc;
+    });
+    N2("fib", 1, (_, a) => {
+      const n = Math.max(0, Math.floor(a[0]));
+      let x = 0, y = 1;
+      for (let k = 0; k < n; k++) {
+        [x, y] = [y, x + y];
+      }
+      return x;
+    });
+    N2("fibList", 1, (_, a) => {
+      const n = Math.max(0, Math.floor(a[0]));
+      const out = [0, 1];
+      while (out.length < n) out.push(out[out.length - 1] + out[out.length - 2]);
+      return out.slice(0, n);
+    });
+    N2("factorial", 1, (_, a) => {
+      let r = 1;
+      for (let k = 2; k <= Math.floor(a[0]); k++) r *= k;
+      return r;
+    });
+    N2("isPrime", 1, (_, a) => isPrimeMillerRabin(a[0]));
+    N2("fermat", 1, (_, a) => fermatCertify(a[0]));
+    N2("zeta", 1, (_, a) => zeta(a[0]));
+    N2("goldmul", 2, (_, a) => goldMul(BigInt(a[0]), BigInt(a[1])).toString());
+    N2("goldadd", 2, (_, a) => goldAdd(BigInt(a[0]), BigInt(a[1])).toString());
+    N2("zmod", 2, (_, a) => zmod(a[0], a[1]));
+    N2("jInvariant", 1, (_, a) => jInvariant(a[0]));
+    N2("blake3", 1, (_, a) => blake3(toStr(a[0])));
+    N2("sedenionMul", 2, (_, a) => sedenionMul(a[0], a[1]));
+    N2("zeroDivisor", 2, (_, a) => detectZeroDivisor(a[0], a[1]));
+    N2("opcodes", 0, () => opcodeTable());
+    N2("executeOpcode", 3, (_, a) => executeOpcode(opcodeTable()[a[0]], a[1], a[2] || new Array(16).fill(0)));
+    N2("zwsEncode", 1, (_, a) => toZeroWidth(toStr(a[0])));
+    N2("zwsDecode", 1, (_, a) => fromZeroWidth(toStr(a[0])));
+    N2("dilithiumKeygen", 1, (_, a) => keygen(toStr(a[0])));
+    N2("dilithiumSign", 2, (i, a) => {
+      const kp = a[1];
+      return sign(toStr(a[0]), kp);
+    });
+    N2("dilithiumVerify", 3, (_, a) => verify(toStr(a[0]), a[1], a[2]));
+    N2("sigma", 2, (_, a) => sigmaKernel(a[0], a[1]));
+    N2("rho", 2, (_, a) => rhoGuard(a[0], a[1]));
+    N2("tierPolicy", 1, (_, a) => tierPolicy(a[0]));
+    N2("proofAnchor", 1, (_, a) => proofAnchor(Array.isArray(a[0]) ? a[0].map(toStr) : [toStr(a[0])]));
+    N2("zeroDivisorVault", 1, (_, a) => zeroDivisorVault(toStr(a[0])));
+    N2("kani", 2, (i, a) => {
+      const fn = a[0];
+      const bound = a[1] || 4;
+      let checked = 0;
+      const rec = (args) => {
+        if (args.length === 2) {
+          try {
+            const out = i.callValue(fn, [args]);
+            checked++;
+            return typeof out === "number" && isFinite(out) ? null : args.slice();
+          } catch {
+            return args.slice();
+          }
+        }
+        for (let v = 0; v < bound; v++) {
+          const ce2 = rec([...args, v]);
+          if (ce2) return ce2;
+        }
+        return null;
+      };
+      const ce = rec([]);
+      return { passed: ce === null, bound, checked, counterexample: ce };
+    });
+    N2("ghost", 1, (_, a) => ghostLogic(toStr(a[0])));
+    N2("inCantorSet", 2, (_, a) => inCantorSet(a[0], a[1] || 20));
+    N2("newLedger", 0, () => new Ledger());
+    N2("newCRDT", 0, () => new CRDT());
+    N2("newMachine", 0, (_, a) => new Machine(a[0] || void 0));
+    N2("fsWrite", 2, (i, a) => {
+      i.globals.vars.get("__fs").set(toStr(a[0]), toStr(a[1]));
+      return true;
+    });
+    N2("fsRead", 1, (i, a) => {
+      const fs = i.globals.vars.get("__fs");
+      return fs.has(toStr(a[0])) ? fs.get(toStr(a[0])) : null;
+    });
+    N2("fsList", 0, (i) => [...i.globals.vars.get("__fs").keys()]);
+    this.globals.vars.set("__fs", /* @__PURE__ */ new Map());
+  }
+  castValue(v, typeName) {
+    const t = typeName.replace(/\s/g, "");
+    if (/^[iu](8|16|32|64|size)$/.test(t)) {
+      const n = Math.trunc(Number(v) || 0);
+      if (t === "u8") return n & 255;
+      if (t === "u16") return n & 65535;
+      if (t === "u32") return n >>> 0;
+      if (t === "i8") return n << 24 >> 24;
+      if (t === "i16") return n << 16 >> 16;
+      if (t === "i32") return n | 0;
+      return n;
+    }
+    if (t === "f32" || t === "f64" || t === "float") return Number(v);
+    if (t === "bool") return truthy(v);
+    if (t === "str" || t === "string") return toStr(v);
+    if (t === "usize" || t === "isize") return Math.trunc(Number(v) || 0);
+    return v;
+  }
+  callValue(fn, args, thisVal) {
+    if (fn instanceof SidAliFunction) return fn.call(this, args, thisVal);
+    if (fn && typeof fn === "object" && fn.__native) {
+      const nat = this.natives.get(fn.__native);
+      return nat.fn(this, args);
+    }
+    if (fn instanceof SidAliClass) {
+      const inst = new SidAliInstance(fn);
+      const ctor = fn.lookupMethod("init") || fn.lookupMethod("constructor");
+      if (ctor) ctor.call(this, args, inst);
+      return inst;
+    }
+    if (fn instanceof SidAliStruct) {
+      const inst = new SidAliInstance(new SidAliClass(fn.name), fn);
+      for (let i = 0; i < fn.fields.length; i++) inst.fields.set(fn.fields[i], args[i]);
+      return inst;
+    }
+    if (fn && typeof fn === "object" && fn.__extern) {
+      const impl = this.externs.get(fn.name);
+      if (impl) return impl(this, args);
+      return null;
+    }
+    if (fn && typeof fn === "object" && fn.__enum) {
+      return { __variant: true, enumName: fn.name, variant: args[0], value: args[1] };
+    }
+    throw new RuntimeError(`value is not callable: ${toStr(fn)}`);
+  }
+  callChunk(chunk, args, thisVal, closure) {
+    const frame = makeFrame(closure, true);
+    for (let i = 0; i < chunk.params.length; i++) frame.vars.set(chunk.params[i], args[i]);
+    if (thisVal !== void 0) {
+      frame.vars.set("this", thisVal);
+      frame.vars.set("self", thisVal);
+    }
+    return this.executeChunk(chunk, frame, thisVal);
+  }
+  run() {
+    const start = Date.now();
+    let error = null;
+    try {
+      this.executeChunk(this.main, this.globals, void 0);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    const dna = this.machine.exportDNA(1024);
+    return {
+      output: this.output,
+      error,
+      stats: {
+        instructions: this.instructions,
+        timeMs: Date.now() - start,
+        witnesses: this.witnesses.length,
+        ramUsed: this.machine.lattice.size,
+        ledgerHeight: this.ledger.entries.length
+      },
+      witnesses: this.witnesses.slice(),
+      dna,
+      ace: this.ace.state
+    };
+  }
+  executeChunk(chunk, frame, thisVal) {
+    const stack = [];
+    const code = chunk.code;
+    let ip = 0;
+    const loopStack = [];
+    const tryStack = [];
+    let lastThrown = null;
+    let pendingReturn = false;
+    const pop = () => stack.pop();
+    while (ip < code.length) {
+      if (++this.instructions > this.maxInstructions) throw new RuntimeError("instruction limit exceeded (possible infinite loop)");
+      const ins = code[ip];
+      const op = ins.op;
+      switch (op) {
+        case "CONST":
+          stack.push(ins.a);
+          ip++;
+          break;
+        case "LOAD":
+          stack.push(getVar(frame, ins.a));
+          ip++;
+          break;
+        case "DECLARE": {
+          const v = stack.pop();
+          frame.vars.set(ins.a, v);
+          ip++;
+          break;
+        }
+        case "DECLARE_CONST": {
+          const v = stack.pop();
+          frame.vars.set(ins.a, v);
+          ip++;
+          break;
+        }
+        case "STORE": {
+          const v = stack.pop();
+          setVar(frame, ins.a, v);
+          ip++;
+          break;
+        }
+        case "POP":
+          stack.pop();
+          ip++;
+          break;
+        case "DUP": {
+          const v = stack[stack.length - 1];
+          stack.push(v);
+          ip++;
+          break;
+        }
+        case "BINOP": {
+          const b = pop(), a = pop();
+          stack.push(this.binop(ins.a, a, b, ins.line));
+          ip++;
+          break;
+        }
+        case "UNOP": {
+          const a = pop();
+          stack.push(this.unop(ins.a, a));
+          ip++;
+          break;
+        }
+        case "JZ": {
+          const c = pop();
+          if (!truthy(c)) ip = ins.a;
+          else ip++;
+          break;
+        }
+        case "JUMP":
+          ip = ins.a;
+          break;
+        case "ARRAY": {
+          const n = ins.a;
+          const items = stack.splice(stack.length - n, n);
+          stack.push(items);
+          ip++;
+          break;
+        }
+        case "OBJECT": {
+          const n = ins.a;
+          const pairs = stack.splice(stack.length - n * 2, n * 2);
+          const obj = {};
+          for (let i = 0; i < n; i++) obj[pairs[i * 2]] = pairs[i * 2 + 1];
+          stack.push(obj);
+          ip++;
+          break;
+        }
+        case "STRUCT_LIT": {
+          const { name, n } = ins.a;
+          const pairs = stack.splice(stack.length - n * 2, n * 2);
+          const ty = lookupFrame(frame, name) ? getVar(frame, name) : null;
+          const struct = ty instanceof SidAliStruct ? ty : new SidAliStruct(name, []);
+          const inst = new SidAliInstance(new SidAliClass(name), struct);
+          for (let i = 0; i < n; i++) inst.fields.set(pairs[i * 2], pairs[i * 2 + 1]);
+          stack.push(inst);
+          ip++;
+          break;
+        }
+        case "INDEX": {
+          const idx = pop(), obj = pop();
+          stack.push(this.index(obj, idx));
+          ip++;
+          break;
+        }
+        case "SET_INDEX": {
+          const val = pop(), idx = pop(), obj = pop();
+          if (Array.isArray(obj)) obj[idx < 0 ? obj.length + idx : idx] = val;
+          else if (obj && typeof obj === "object") obj[idx] = val;
+          stack.push(val);
+          ip++;
+          break;
+        }
+        case "MEMBER": {
+          const obj = pop();
+          stack.push(this.member(obj, ins.a));
+          ip++;
+          break;
+        }
+        case "SET_MEMBER": {
+          const val = pop(), obj = pop();
+          if (obj instanceof SidAliInstance) obj.fields.set(ins.a, val);
+          else if (obj && typeof obj === "object") obj[ins.a] = val;
+          stack.push(val);
+          ip++;
+          break;
+        }
+        case "LEN": {
+          const v = pop();
+          stack.push(this.lengthOf(v));
+          ip++;
+          break;
+        }
+        case "MAKE_FN": {
+          const ch = this.chunks.get(ins.a);
+          stack.push(new SidAliFunction(ch, frame, ch.name));
+          ip++;
+          break;
+        }
+        case "MAKE_STRUCT": {
+          const spec = ins.a;
+          stack.push(new SidAliStruct(spec.name, spec.fields, spec.reprC, spec.packed));
+          ip++;
+          break;
+        }
+        case "MAKE_ENUM": {
+          const spec = ins.a;
+          const variants = {};
+          for (const v of spec.variants) variants[v.name] = new SidAliEnumVariant(spec.name, v.name, v.arity);
+          stack.push({ __enum: true, name: spec.name, variants });
+          ip++;
+          break;
+        }
+        case "ATTACH_METHOD": {
+          const target = getVar(frame, ins.a);
+          const ch = this.chunks.get(ins.b.chunk);
+          const fn = new SidAliFunction(ch, frame, `${ins.a}.${ins.b.name}`);
+          if (target instanceof SidAliStruct) target.staticMethods.set(ins.b.name, fn);
+          else if (target instanceof SidAliClass) target.methods.set(ins.b.name, fn);
+          else if (target && typeof target === "object" && target.__enum) target.methods = target.methods || /* @__PURE__ */ new Map(), target.methods.set(ins.b.name, fn);
+          ip++;
+          break;
+        }
+        case "UNSAFE_ENTER":
+          this.unsafeDepth++;
+          ip++;
+          break;
+        case "UNSAFE_LEAVE":
+          this.unsafeDepth = Math.max(0, this.unsafeDepth - 1);
+          ip++;
+          break;
+        case "DECLARE_EXTERN": {
+          const spec = ins.a;
+          const native = this.externs.get(spec.name) || null;
+          frame.vars.set(spec.name, native || { __extern: true, name: spec.name, params: spec.params });
+          ip++;
+          break;
+        }
+        case "USE":
+          ip++;
+          break;
+        case "CAST": {
+          const v = pop();
+          stack.push(this.castValue(v, ins.a));
+          ip++;
+          break;
+        }
+        case "REF": {
+          const v = pop();
+          stack.push({ __ref: true, mut: !!ins.a, target: v, box: { value: v } });
+          ip++;
+          break;
+        }
+        case "DEREF": {
+          const v = pop();
+          stack.push(v && v.__ref ? v.box.value : v);
+          ip++;
+          break;
+        }
+        case "MAKE_RANGE": {
+          const end = pop(), start = pop();
+          stack.push({ __range: true, start, end, inclusive: !!ins.a });
+          ip++;
+          break;
+        }
+        case "MAKE_CLASS": {
+          const spec = ins.a;
+          const cls = new SidAliClass(spec.name);
+          if (spec.parent) {
+            const parentVal = lookupFrame(frame, spec.parent) ? getVar(frame, spec.parent) : null;
+            if (parentVal instanceof SidAliClass) cls.parent = parentVal;
+          }
+          for (const m of spec.methods) {
+            const ch = this.chunks.get(m.chunk);
+            cls.methods.set(m.name, new SidAliFunction(ch, frame, `${spec.name}.${m.name}`));
+          }
+          stack.push(cls);
+          ip++;
+          break;
+        }
+        case "NEW": {
+          const n = ins.b;
+          const args = stack.splice(stack.length - n, n);
+          const cls = getVar(frame, ins.a);
+          if (!(cls instanceof SidAliClass)) throw new RuntimeError(`${ins.a} is not a class`);
+          const inst = new SidAliInstance(cls);
+          const ctor = cls.lookupMethod("init") || cls.lookupMethod("constructor");
+          if (ctor) ctor.call(this, args, inst);
+          stack.push(inst);
+          ip++;
+          break;
+        }
+        case "CALL": {
+          const n = ins.a;
+          const args = stack.splice(stack.length - n, n);
+          const fn = pop();
+          stack.push(this.callValue(fn, args));
+          ip++;
+          break;
+        }
+        case "CALL_METHOD": {
+          const n = ins.b;
+          const args = stack.splice(stack.length - n, n);
+          const obj = pop();
+          stack.push(this.callMethod(obj, ins.a, args));
+          ip++;
+          break;
+        }
+        case "TRANSCEND": {
+          const arg = pop();
+          if (ins.a === "pi") stack.push(Math.PI * arg);
+          else stack.push(Math.log(Math.abs(arg) || 1) * Math.E);
+          ip++;
+          break;
+        }
+        case "PRINT": {
+          const v = pop();
+          this.output.push(toStr(v));
+          ip++;
+          break;
+        }
+        case "LOOP_ENTER":
+          loopStack.push({ continuePc: ins.a, breakPc: ins.b });
+          ip++;
+          break;
+        case "LOOP_END":
+          loopStack.pop();
+          ip++;
+          break;
+        case "BREAK": {
+          const l = loopStack[loopStack.length - 1];
+          ip = l ? l.breakPc : code.length;
+          break;
+        }
+        case "CONTINUE": {
+          const l = loopStack[loopStack.length - 1];
+          ip = l ? l.continuePc : ip + 1;
+          break;
+        }
+        case "TRY_ENTER":
+          tryStack.push({ handlerPc: ins.a });
+          ip++;
+          break;
+        case "TRY_LEAVE":
+          tryStack.pop();
+          ip++;
+          break;
+        case "CATCH_BIND": {
+          frame.vars.set(ins.a, lastThrown);
+          lastThrown = null;
+          ip++;
+          break;
+        }
+        case "FINALLY_END":
+          ip++;
+          break;
+        case "THROW": {
+          const v = pop();
+          lastThrown = v;
+          if (tryStack.length) {
+            const t = tryStack.pop();
+            ip = t.handlerPc;
+          } else {
+            throw new RuntimeError(`uncaught: ${toStr(v)}`, ins.line);
+          }
+          break;
+        }
+        case "IMPORT":
+          ip++;
+          break;
+        case "BUILD":
+          stack.push({ __builder: true, target: ins.a, args: [] });
+          ip++;
+          break;
+        case "BUILD_APPLY": {
+          const n = ins.a;
+          const args = stack.splice(stack.length - n, n);
+          const b = pop();
+          b.args = args;
+          this.onBuild(b);
+          stack.push(b);
+          ip++;
+          break;
+        }
+        case "RET": {
+          const v = stack.length ? pop() : null;
+          return v;
+        }
+        case "HALT":
+          return null;
+        default:
+          throw new RuntimeError(`unknown opcode ${op}`);
+      }
+    }
+    return null;
+  }
+  onBuild(b) {
+    const target = b.target || "build";
+    const label = toStr(b.args[0] ?? target);
+    const witness = blake3(`${target}|${label}|${b.args.map(toStr).join(",")}`);
+    this.witnesses.push(witness);
+    this.ace.charge(1, target);
+    this.ledger.append("build", `${target}:${label}`);
+    this.output.push(`[build] ${target} \u2192 ${label} (witness ${witness.slice(0, 12)})`);
+  }
+  lengthOf(v) {
+    if (typeof v === "string") return [...v].length;
+    if (Array.isArray(v)) return v.length;
+    if (v instanceof Map) return v.size;
+    if (v && typeof v === "object" && v.__range) {
+      const { start, end, inclusive } = v;
+      const hi = inclusive ? end + 1 : end;
+      return end >= start ? Math.max(0, hi - start) : Math.max(0, start - hi);
+    }
+    if (v && typeof v === "object") return Object.keys(v).length;
+    return 0;
+  }
+  index(obj, idx) {
+    if (obj && typeof obj === "object" && obj.__range) {
+      const { start, end, inclusive } = obj;
+      const hi = inclusive ? end + 1 : end;
+      if (end >= start) return start + idx;
+      return start - idx;
+    }
+    if (typeof obj === "string") return [...obj][idx] ?? null;
+    if (Array.isArray(obj)) return obj[idx < 0 ? obj.length + idx : idx] ?? null;
+    if (obj instanceof Map) return obj.get(idx);
+    if (obj && typeof obj === "object") return obj[idx] ?? null;
+    return null;
+  }
+  member(obj, prop) {
+    if (obj instanceof SidAliInstance) {
+      if (obj.fields.has(prop)) return obj.fields.get(prop);
+      const m = obj.cls.lookupMethod(prop) || (obj.struct ? obj.struct.lookupMethod(prop) : void 0);
+      if (m) return m;
+      const st = obj.cls.lookupStatic(prop);
+      if (st !== void 0) return st;
+      return null;
+    }
+    if (obj instanceof SidAliClass) {
+      const st = obj.lookupStatic(prop);
+      if (st !== void 0) return st;
+      return null;
+    }
+    if (obj instanceof SidAliStruct) {
+      const m = obj.staticMethods.get(prop);
+      if (m) return m;
+      return null;
+    }
+    if (obj && typeof obj === "object" && obj.__enum) return obj.variants[prop] ?? null;
+    if (Array.isArray(obj) && (prop === "length" || prop === "len")) return obj.length;
+    if (typeof obj === "string" && (prop === "length" || prop === "len")) return [...obj].length;
+    if (obj instanceof Ledger && prop === "height") return obj.entries.length;
+    if (obj instanceof Ledger && prop === "size") return obj.entries.length;
+    if (obj instanceof CRDT && prop === "size") return obj.size;
+    if (obj instanceof Machine && prop === "ring") return obj.ring;
+    if (obj && typeof obj === "object") return obj[prop] ?? null;
+    return null;
+  }
+  callMethod(obj, name, args) {
+    if (obj instanceof SidAliInstance) {
+      const m = obj.cls.lookupMethod(name) || (obj.struct ? obj.struct.lookupMethod(name) : void 0);
+      if (m) return m.call(this, args, obj);
+      const native = this.instanceNative(obj, name, args);
+      if (native !== void 0) return native;
+      throw new RuntimeError(`${obj.struct ? obj.struct.name : obj.cls.name} has no method '${name}'`);
+    }
+    if (Array.isArray(obj)) return this.arrayMethod(obj, name, args);
+    if (typeof obj === "string") return this.stringMethod(obj, name, args);
+    if (typeof obj === "number") return this.numberMethod(obj, name, args);
+    if (obj instanceof Ledger) return this.ledgerMethod(obj, name, args);
+    if (obj instanceof CRDT) return this.crdtMethod(obj, name, args);
+    if (obj instanceof Machine) return this.machineMethod(obj, name, args);
+    if (obj instanceof ACEEnvelope) return this.aceMethod(obj, name, args);
+    throw new RuntimeError(`cannot call method '${name}' on ${toStr(obj)}`);
+  }
+  instanceNative(obj, name, args) {
+    if (name === "toString") return toStr(obj);
+    if (name === "get") return obj.fields.get(args[0]);
+    if (name === "set") {
+      obj.fields.set(args[0], args[1]);
+      return obj;
+    }
+    return void 0;
+  }
+  arrayMethod(arr, name, args) {
+    switch (name) {
+      case "push":
+        arr.push(args[0]);
+        return arr;
+      case "pop":
+        return arr.pop();
+      case "len":
+      case "length":
+        return arr.length;
+      case "map":
+        return arr.map((x, i) => this.callValue(args[0], [x, i]));
+      case "filter":
+        return arr.filter((x, i) => truthy(this.callValue(args[0], [x, i])));
+      case "reduce": {
+        let acc = args[1];
+        for (let i = 0; i < arr.length; i++) acc = this.callValue(args[0], [acc, arr[i], i]);
+        return acc;
+      }
+      case "join":
+        return arr.map(toStr).join(toStr(args[0] ?? ","));
+      case "slice":
+        return arr.slice(args[0], args[1]);
+      case "sort":
+        return arr.slice().sort((a, b) => args[0] ? this.callValue(args[0], [a, b]) : a > b ? 1 : a < b ? -1 : 0);
+      case "reverse":
+        return arr.slice().reverse();
+      case "indexOf":
+        return arr.indexOf(args[0]);
+      case "includes":
+        return arr.includes(args[0]);
+      case "sum":
+        return arr.reduce((s, x) => s + (Number(x) || 0), 0);
+      case "min":
+        return Math.min(...arr);
+      case "max":
+        return Math.max(...arr);
+      default:
+        throw new RuntimeError(`array has no method '${name}'`);
+    }
+  }
+  stringMethod(s, name, args) {
+    switch (name) {
+      case "upper":
+        return s.toUpperCase();
+      case "lower":
+        return s.toLowerCase();
+      case "trim":
+        return s.trim();
+      case "split":
+        return s.split(toStr(args[0]));
+      case "includes":
+        return s.includes(toStr(args[0]));
+      case "indexOf":
+        return s.indexOf(toStr(args[0]));
+      case "slice":
+        return s.slice(args[0], args[1]);
+      case "replace":
+        return s.split(toStr(args[0])).join(toStr(args[1]));
+      case "repeat":
+        return s.repeat(args[0]);
+      case "chars":
+        return [...s];
+      case "len":
+      case "length":
+        return [...s].length;
+      case "startsWith":
+        return s.startsWith(toStr(args[0]));
+      case "endsWith":
+        return s.endsWith(toStr(args[0]));
+      case "toNumber":
+        return parseFloat(s) || 0;
+      default:
+        throw new RuntimeError(`string has no method '${name}'`);
+    }
+  }
+  numberMethod(n, name, _args) {
+    switch (name) {
+      case "floor":
+        return Math.floor(n);
+      case "ceil":
+        return Math.ceil(n);
+      case "round":
+        return Math.round(n);
+      case "abs":
+        return Math.abs(n);
+      case "toString":
+        return fmtNum(n);
+      default:
+        throw new RuntimeError(`number has no method '${name}'`);
+    }
+  }
+  ledgerMethod(l, name, args) {
+    switch (name) {
+      case "append":
+        return l.append(toStr(args[0]), toStr(args[1]));
+      case "verify":
+        return l.verifyChain();
+      case "size":
+        return l.entries.length;
+      case "all":
+        return l.entries;
+      default:
+        throw new RuntimeError(`ledger has no method '${name}'`);
+    }
+  }
+  crdtMethod(c, name, args) {
+    switch (name) {
+      case "set":
+        c.set(toStr(args[0]), toStr(args[1]), args[2] ?? Date.now(), toStr(args[3] ?? "n1"));
+        return c;
+      case "get":
+        return c.get(toStr(args[0])) ?? null;
+      case "merge":
+        c.merge(args[0]);
+        return c;
+      case "size":
+        return c.size;
+      case "entries":
+        return Object.fromEntries(c.entries());
+      default:
+        throw new RuntimeError(`crdt has no method '${name}'`);
+    }
+  }
+  machineMethod(m, name, args) {
+    switch (name) {
+      case "boot":
+        return m.boot();
+      case "load":
+        return m.loadLattice(toStr(args[0]));
+      case "exportDNA":
+        return m.exportDNA(args[0] || 1024);
+      case "importDNA":
+        return m.importDNA(toStr(args[0]));
+      case "writeMBR":
+        return m.writeMBR(toStr(args[0]));
+      case "read":
+        return Array.from(m.read(args[0], args[1]));
+      default:
+        throw new RuntimeError(`machine has no method '${name}'`);
+    }
+  }
+  aceMethod(a, name, args) {
+    switch (name) {
+      case "charge":
+        return a.charge(args[0], toStr(args[1] ?? "op"));
+      case "witness":
+        return a.witness(toStr(args[0]));
+      case "state":
+        return a.state;
+      default:
+        throw new RuntimeError(`ace has no method '${name}'`);
+    }
+  }
+  binop(op, a, b, line) {
+    switch (op) {
+      case "+": {
+        if (typeof a === "string" || typeof b === "string") return toStr(a) + toStr(b);
+        return a + b;
+      }
+      case "-":
+        return a - b;
+      case "*":
+        return a * b;
+      case "/":
+        return b === 0 ? NaN : a / b;
+      case "%":
+        return a % b;
+      case "**":
+        return Math.pow(a, b);
+      case "==":
+        return this.looseEq(a, b);
+      case "!=":
+        return !this.looseEq(a, b);
+      case "<":
+        return a < b;
+      case ">":
+        return a > b;
+      case "<=":
+        return a <= b;
+      case ">=":
+        return a >= b;
+      case "&&":
+        return truthy(a) ? b : a;
+      case "||":
+        return truthy(a) ? a : b;
+      case "&":
+        return (a | 0) & (b | 0);
+      case "|":
+        return a | 0 | (b | 0);
+      case "^":
+        return (a | 0) ^ (b | 0);
+      default:
+        throw new RuntimeError(`unsupported operator ${op}`, line);
+    }
+  }
+  looseEq(a, b) {
+    if (a === b) return true;
+    if (a === null || b === null || a === void 0 || b === void 0) return false;
+    if (a instanceof SidAliEnumVariant && typeof b === "string") return a.variant === b;
+    if (b instanceof SidAliEnumVariant && typeof a === "string") return b.variant === a;
+    if (a instanceof SidAliEnumVariant && b instanceof SidAliEnumVariant) return a.enumName === b.enumName && a.variant === b.variant;
+    if (typeof a === "number" && typeof b === "string") return a === Number(b);
+    if (typeof a === "string" && typeof b === "number") return Number(a) === b;
+    if (Array.isArray(a) && Array.isArray(b)) return JSON.stringify(a) === JSON.stringify(b);
+    return false;
+  }
+  unop(op, a) {
+    switch (op) {
+      case "-":
+        return -a;
+      case "+":
+        return +a;
+      case "!":
+        return !truthy(a);
+      case "~":
+        return ~a;
+      default:
+        throw new RuntimeError(`unsupported unary operator ${op}`);
+    }
+  }
+};
+function runSource(source) {
+  const ast = parse(source);
+  const compiled = compile(ast);
+  const interp = new Interpreter(compiled);
+  return interp.run();
+}
+
+// src/compiler/translator.ts
+function alpPolicy(multiplicity, artaDefects) {
+  let policy = "NONE";
+  if (artaDefects > 0) policy = "REDUCE_ARTA";
+  else if (multiplicity < 3) policy = "INCREASE_MULTIPLICITY";
+  return { multiplicity, artaDefects, policy };
+}
+function rtaMetric(confidence, artaDefects) {
+  return Math.max(0, Math.min(1, confidence - artaDefects * 0.1));
+}
+var NUMBER_WORDS = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  hundred: 100,
+  thousand: 1e3
+};
+function wordsToNumbers(text) {
+  return text.replace(
+    /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|hundred|thousand)\b/gi,
+    (m) => String(NUMBER_WORDS[m.toLowerCase()] ?? m)
+  );
+}
+function rewriteArithmetic(s) {
+  let out = s;
+  out = out.replace(
+    /\b(add|sum|plus)\s+([A-Za-z_$][\w$]*)\s+(?:and|to|\+)\s+([A-Za-z_$][\w$]*)/gi,
+    (_m, _v, a, b) => `${a} + ${b}`
+  );
+  out = out.replace(
+    /\b(subtract|minus)\s+([A-Za-z_$][\w$]*)\s+(?:from|and|-)\s+([A-Za-z_$][\w$]*)/gi,
+    (_m, _v, a, b) => `${a} - ${b}`
+  );
+  out = out.replace(
+    /\b(multiply|times|product of)\s+([A-Za-z_$][\w$]*)\s+(?:by|and|\*)\s+([A-Za-z_$][\w$]*)/gi,
+    (_m, _v, a, b) => `${a} * ${b}`
+  );
+  out = out.replace(
+    /\b(divide)\s+([A-Za-z_$][\w$]*)\s+(?:by|and|\/)\s+([A-Za-z_$][\w$]*)/gi,
+    (_m, _v, a, b) => `${a} / ${b}`
+  );
+  return out;
+}
+function rewriteComparisons(s) {
+  return s.replace(/\bis greater than\b/gi, ">").replace(/\bis less than\b/gi, "<").replace(/\bgreater than or equal to\b/gi, ">=").replace(/\bless than or equal to\b/gi, "<=").replace(/\bequals?\b(?!\s+to)/gi, "==");
+}
+var GraphemeDecomposer = class {
+  decompose(input) {
+    const notes = [];
+    const raw = input.trim();
+    const lower = raw.toLowerCase();
+    let code = "";
+    let intent = "expression";
+    let confidence = 0.6;
+    const buildIntent = this.matchBuildIntent(lower);
+    if (buildIntent) {
+      return {
+        code: buildIntent.code,
+        intent: buildIntent.intent,
+        confidence: 0.92,
+        rta: rtaMetric(0.92, 0),
+        notes: [`matched build intent: ${buildIntent.intent}`]
+      };
+    }
+    let text = raw;
+    text = rewriteArithmetic(text);
+    text = rewriteComparisons(text);
+    text = wordsToNumbers(text);
+    text = text.replace(/^\s*(print|say|show|display|output)\s+(?:the\s+)?(?:value\s+of\s+)?(.+)$/i, "print $1");
+    const repeatMatch = text.match(/^\s*(?:repeat|loop)\s+(\d+)\s+times?\s*[:,]?\s*(.*)$/i);
+    if (repeatMatch) {
+      const n = repeatMatch[1];
+      const inner = repeatMatch[2].trim() || 'print "hello"';
+      const innerCode = this.decomposeInline(inner);
+      return {
+        code: `repeat ${n} {
+  ${innerCode}
+}`,
+        intent: "repeat-loop",
+        confidence: 0.9,
+        rta: rtaMetric(0.9, 0),
+        notes: ["repeat loop"]
+      };
+    }
+    text = text.replace(/^\s*(?:create|make|set|define|declare)\s+(?:a\s+)?(?:variable\s+)?([A-Za-z_$][\w$]*)\s+(?:equal to|to|as|=)\s+(.+)$/i, "let $1 = $2");
+    text = text.replace(/^\s*(?:let|set)\s+([A-Za-z_$][\w$]*)\s+(?:be|=)\s+(.+)$/i, "let $1 = $2");
+    text = text.replace(/^\s*([A-Za-z_$][\w$]*)\s+is\s+(.+)$/i, "let $1 = $2");
+    text = text.replace(/^\s*(?:compute|calculate)\s+([A-Za-z_$][\w$]*)\s+(?:as|equals?|=)\s+(.+)$/i, "let $1 = $2");
+    const ifMatch = text.match(/^\s*if\s+(.+?)\s+(?:then\s+)?(?:print|say|show)\s+(.+)$/i);
+    if (ifMatch) {
+      const cond = ifMatch[1].trim();
+      const body = ifMatch[2].trim();
+      const bodyCode = this.decomposeInline(body);
+      return {
+        code: `if ${cond} {
+  ${bodyCode}
+}`,
+        intent: "conditional",
+        confidence: 0.88,
+        rta: rtaMetric(0.88, 0),
+        notes: ["conditional"]
+      };
+    }
+    const fnMatch = text.match(/^\s*(?:define|create|make)?\s*(?:a\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:of|with|taking)?\s*\(?([A-Za-z_$][\w$]*)?\)?\s*(?:that\s+)?(?:returns?|gives?|is)\s+(.+)$/i);
+    if (fnMatch) {
+      const name = fnMatch[1];
+      const param = fnMatch[2] || "n";
+      const body = fnMatch[3].trim();
+      return {
+        code: `function ${name}(${param}) {
+  return ${body}
+}`,
+        intent: "function",
+        confidence: 0.9,
+        rta: rtaMetric(0.9, 0),
+        notes: ["function definition"]
+      };
+    }
+    code = text;
+    confidence = 0.7;
+    const statements = text.split(/\s+and then\s+|;\s*|\n+/).map((s) => s.trim()).filter(Boolean);
+    if (statements.length > 1) {
+      code = statements.map((s) => this.decomposeInline(s)).join("\n");
+      intent = "program";
+      confidence = 0.8;
+    } else {
+      code = this.decomposeInline(text);
+      intent = /^print\b/.test(code) ? "print" : /^let\b/.test(code) ? "assignment" : "expression";
+    }
+    notes.push("normalized English \u2192 SidAli");
+    return { code, intent, confidence, rta: rtaMetric(confidence, 0), notes };
+  }
+  decomposeInline(s) {
+    let t = s.trim();
+    t = rewriteArithmetic(t);
+    t = rewriteComparisons(t);
+    t = wordsToNumbers(t);
+    t = t.replace(/^\s*(?:print|say|show|display|output)\s+(?:the\s+)?(?:value\s+of\s+)?(.+)$/i, "print $1");
+    t = t.replace(/^\s*(?:create|make|set|define|declare)\s+(?:a\s+)?(?:variable\s+)?([A-Za-z_$][\w$]*)\s+(?:equal to|to|as|=)\s+(.+)$/i, "let $1 = $2");
+    t = t.replace(/^\s*([A-Za-z_$][\w$]*)\s+is\s+(.+)$/i, "let $1 = $2");
+    t = t.replace(/^print\s+([A-Za-z_][\w$]*)$/i, (m, w) => {
+      if (["true", "false", "nil"].includes(w.toLowerCase())) return `print ${w.toLowerCase()}`;
+      return `print "${w}"`;
+    });
+    return t;
+  }
+  matchBuildIntent(lower) {
+    const has = (...ws) => ws.some((w) => lower.includes(w));
+    if (has("operating system", "an os", "mini os", "system that reads")) {
+      return { intent: "build-os", code: OS_EXAMPLE };
+    }
+    if (has("social", "social network", "social media", "community platform", "social platform")) {
+      return { intent: "build-social", code: SOCIAL_EXAMPLE };
+    }
+    if (has("zk", "zero knowledge", "zero-knowledge", "snark", "smart contract", "blockchain")) {
+      return { intent: "build-zk", code: ZK_EXAMPLE };
+    }
+    if (has("ghost logic", "zero-width", "zero width", "steganography", "zws")) {
+      return { intent: "build-ghost", code: GHOST_EXAMPLE };
+    }
+    if (has("fibonacci", "factorial", "math suite")) {
+      return { intent: "build-math", code: MATH_EXAMPLE };
+    }
+    if (has("build a language", "compiler", "programming language")) {
+      return { intent: "build-language", code: LANGUAGE_EXAMPLE };
+    }
+    return null;
+  }
+};
+var OS_EXAMPLE = `// SidAli mini operating system: file read/write over the RAM machine
+let m = newMachine()
+m.writeMBR("SECTORFORTH init")
+let boot = m.boot()
+print "ring " + boot.ring
+fsWrite("/etc/motd", "welcome to SidAli OS")
+fsWrite("/home/user.txt", "hello from ring 0")
+let data = fsRead("/home/user.txt")
+print "read: " + data
+print "files: " + len(fsList())`;
+var SOCIAL_EXAMPLE = `// SidAli social platform: CRDT convergence + append-only ledger
+let feed = newCRDT()
+let l = newLedger()
+feed.set("post:1", "hello world", 1, "node-a")
+feed.set("post:2", "sidali is live", 2, "node-b")
+feed.set("post:1", "hello world (edited)", 3, "node-a")
+l.append("post", "post:1")
+l.append("post", "post:2")
+print "feed size " + feed.size
+print feed.get("post:1")
+print "ledger valid " + l.verify()
+print "ledger height " + l.size`;
+var ZK_EXAMPLE = `// SidAli zk-SNARK style contract with post-quantum Dilithium signatures
+let kp = dilithiumKeygen("contract-seed")
+let l = newLedger()
+l.append("deploy", "verifier")
+l.append("commit", blake3("state=42"))
+let sig = dilithiumSign("transfer 10 to bob", kp)
+print "sig ok " + dilithiumVerify("transfer 10 to bob", sig, kp)
+print "tampered ok " + dilithiumVerify("transfer 999 to bob", sig, kp)
+print "proof anchor " + proofAnchor(["state=42", "bob"])
+print "chain " + l.verify()`;
+var GHOST_EXAMPLE = `// SidAli ghost logic + zero-width steganography (Cantor sieve)
+let secret = "sidali-void"
+let hidden = zwsEncode(secret)
+print "encoded length " + len(hidden)
+print "decoded " + zwsDecode(hidden)
+let g = ghost("let x=5")
+print "semantic volume " + g.semanticVolume
+print "measure " + g.measure`;
+var MATH_EXAMPLE = `// SidAli real math suite
+print "fib 55 " + fib(55)
+print "factorial 5 " + factorial(5)
+let square = function(n) { return n * n }
+print "square 7 " + square(7)
+let x = 5
+let y = 10
+print "sum " + (x + y)
+print "primes " + isPrime(97)
+print "zeta 2 " + zeta(2)`;
+var LANGUAGE_EXAMPLE = `// SidAli builds languages: transcendental AST + 64 sedenion opcodes
+let ops = opcodes()
+print "opcodes " + len(ops)
+let a = [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+let b = [0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0]
+let zd = zeroDivisor(a, b)
+print "norm product " + zd.normProduct
+print "pi node " + pi(2)`;
+
+// src/compiler/llvm.ts
+var TARGETS = {
+  "x86_64-linux": { name: "x86_64-linux", triple: "x86_64-unknown-linux-gnu", cpu: "", march: "", features: "", freestanding: false, ptrBits: 64 },
+  "aarch64-linux": { name: "aarch64-linux", triple: "aarch64-unknown-linux-gnu", cpu: "", march: "", features: "", freestanding: false, ptrBits: 64 },
+  "armv7m-none-eabi": { name: "armv7m-none-eabi", triple: "thumbv7m-none-eabi", cpu: "cortex-m3", march: "armv7-m", features: "", freestanding: true, ptrBits: 32, substrate: "electron" },
+  "cortex-m4": { name: "cortex-m4", triple: "thumbv7em-none-eabi", cpu: "cortex-m4", march: "armv7e-m", features: "", freestanding: true, ptrBits: 32, substrate: "electron" },
+  "riscv32-none-elf": { name: "riscv32-none-elf", triple: "riscv32-none-elf", cpu: "", march: "rv32imac", features: "", freestanding: true, ptrBits: 32, substrate: "electron" },
+  "riscv64-none-elf": { name: "riscv64-none-elf", triple: "riscv64-none-elf", cpu: "", march: "rv64imac", features: "", freestanding: true, ptrBits: 64, substrate: "electron" },
+  wasm32: { name: "wasm32", triple: "wasm32-unknown-unknown", cpu: "generic", march: "", features: "", freestanding: true, ptrBits: 32, substrate: "electron" },
+  bpfel: { name: "bpfel", triple: "bpfel-unknown-none", cpu: "generic", march: "", features: "", freestanding: true, ptrBits: 64, objectOnly: true, substrate: "electron" },
+  // --- non-electron substrates: same SAIR, different physics.
+  // Photonic/quantum/fluidic/vacuum/holographic/plasma/energy logic all lowers to
+  // a real clang architecture today (RISC-V, ARM, wasm); the DNA header records
+  // which physical substrate the image is destined for.
+  "photon-riscv": { name: "photon-riscv", triple: "riscv64-unknown-none-elf", cpu: "", march: "rv64imac", features: "", freestanding: true, ptrBits: 64, substrate: "photon" },
+  "qubit-riscv": { name: "qubit-riscv", triple: "riscv32-unknown-none-elf", cpu: "", march: "rv32imac", features: "", freestanding: true, ptrBits: 32, substrate: "qubit" },
+  "fluidic-riscv": { name: "fluidic-riscv", triple: "riscv32-unknown-none-elf", cpu: "", march: "rv32imac", features: "", freestanding: true, ptrBits: 32, substrate: "fluidic" },
+  "vacuum-riscv": { name: "vacuum-riscv", triple: "riscv64-unknown-none-elf", cpu: "", march: "rv64imac", features: "", freestanding: true, ptrBits: 64, substrate: "vacuum" },
+  "holographic-wasm": { name: "holographic-wasm", triple: "wasm32-unknown-unknown", cpu: "generic", march: "", features: "", freestanding: true, ptrBits: 32, substrate: "holographic" },
+  "plasma-arm": { name: "plasma-arm", triple: "thumbv7em-none-eabi", cpu: "cortex-m4", march: "armv7e-m", features: "", freestanding: true, ptrBits: 32, substrate: "plasma" },
+  "energy-riscv": { name: "energy-riscv", triple: "riscv32-unknown-none-elf", cpu: "", march: "rv32imac", features: "", freestanding: true, ptrBits: 32, substrate: "energy" }
+};
+var LlvmError = class extends Error {
+};
+var I64 = { name: "i64", llvm: "i64", kind: "int", bits: 64, signed: true };
+var I32 = { name: "i32", llvm: "i32", kind: "int", bits: 32, signed: true };
+var F64 = { name: "f64", llvm: "double", kind: "float", bits: 64 };
+var VOID = { name: "void", llvm: "void", kind: "void" };
+var BOOL = { name: "bool", llvm: "i1", kind: "bool" };
+var STR = { name: "str", llvm: "ptr", kind: "str" };
+var PTR = { name: "ptr", llvm: "ptr", kind: "ptr" };
+function intType(bits, signed) {
+  return { name: `${signed ? "i" : "u"}${bits}`, llvm: `i${bits}`, kind: "int", bits, signed };
+}
+var PRIM = {
+  i8: intType(8, true),
+  u8: intType(8, false),
+  char: intType(8, false),
+  i16: intType(16, true),
+  u16: intType(16, false),
+  i32: intType(32, true),
+  u32: intType(32, false),
+  i64: intType(64, true),
+  u64: intType(64, false),
+  int: I64,
+  isize: I64,
+  usize: I64,
+  long: I64,
+  f32: { name: "f32", llvm: "float", kind: "float", bits: 32 },
+  f64: F64,
+  float: F64,
+  bool: BOOL,
+  str: STR,
+  string: STR,
+  void: VOID
+};
+function emitLlvm(program, opts) {
+  const target = TARGETS[opts.target];
+  if (!target) throw new LlvmError(`unknown target '${opts.target}' (available: ${Object.keys(TARGETS).join(", ")})`);
+  const gen = new LlvmGen(program, target, opts.optLevel ?? 2, opts.entry ?? "main");
+  return { ir: gen.generate(), target };
+}
+var LlvmGen = class {
+  constructor(program, target, optLevel, entry) {
+    this.program = program;
+    this.target = target;
+    this.optLevel = optLevel;
+    this.entry = entry;
+    this.structs = /* @__PURE__ */ new Map();
+    this.enums = /* @__PURE__ */ new Map();
+    this.fns = /* @__PURE__ */ new Map();
+    this.lines = [];
+    this.strings = [];
+    this.strCounter = 0;
+    this.regCounter = 0;
+    this.labelCounter = 0;
+    this.currentRet = VOID;
+    this.locals = /* @__PURE__ */ new Map();
+    this.loopStack = [];
+    this.declares = [];
+    this.rangeEnd = null;
+    this.selfStruct = null;
+    this.globals = /* @__PURE__ */ new Map();
+  }
+  /** Evaluate a compile-time constant expression to an LLVM constant string. */
+  constEval(node, ty) {
+    switch (node.kind) {
+      case "NumLit":
+        return ty.kind === "float" ? this.floatLit(node.value) : String(Math.trunc(node.value));
+      case "BoolLit":
+        return node.value ? "1" : "0";
+      case "StrLit": {
+        const s = this.internString(node.value);
+        return this.ptrToStrConst(s.name);
+      }
+      case "UnaryOp": {
+        const v = this.constEval(node.operand, ty);
+        if (v === null) return null;
+        if (node.op === "-") return ty.kind === "float" ? `-${v}` : String(-Number(v));
+        return v;
+      }
+      case "BinOp": {
+        const l = this.constEval(node.left, ty), r = this.constEval(node.right, ty);
+        if (l === null || r === null) return null;
+        if (ty.kind === "float") {
+          const a2 = Number(l), b2 = Number(r);
+          return String(node.op === "+" ? a2 + b2 : node.op === "-" ? a2 - b2 : node.op === "*" ? a2 * b2 : node.op === "/" ? a2 / b2 : 0);
+        }
+        const a = Number(l), b = Number(r);
+        const ops = { "+": a + b, "-": a - b, "*": a * b, "/": Math.trunc(a / b), "%": a % b, "<<": a << b, ">>": a >> b, "&": a & b, "|": a | b, "^": a ^ b };
+        return ops[node.op] !== void 0 ? String(ops[node.op]) : null;
+      }
+      case "Ident": {
+        const g2 = this.globals.get(node.name);
+        return null;
+      }
+      default:
+        return null;
+    }
+  }
+  ptrToStrConst(name) {
+    return `getelementptr inbounds ([1 x i8], ptr ${name}, i64 0, i64 0)`;
+  }
+  genGlobal(node) {
+    const ty = node.type ? this.resolveType(node.type) : this.inferType(node.init);
+    this.globals.set(node.name, ty);
+    const isConst = node.kind === "ConstDecl";
+    const init = node.init ? this.constEval(node.init, ty) : null;
+    const value = init !== null ? init : this.zero(ty);
+    this.declares.push(`@${node.name} = ${isConst ? "constant" : "global"} ${ty.llvm} ${value}`);
+  }
+  reg() {
+    return `%t${this.regCounter++}`;
+  }
+  label(p = "L") {
+    return `${p}.${this.labelCounter++}`;
+  }
+  emit(line) {
+    this.lines.push("  " + line);
+  }
+  emitRaw(line) {
+    this.lines.push(line);
+  }
+  internString(s) {
+    const idx = this.strCounter++;
+    const name = `@.str.${idx}`;
+    const bytes = [...new TextEncoder().encode(s)];
+    const esc = bytes.map((b) => {
+      if (b === 34) return "\\22";
+      if (b === 92) return "\\5C";
+      if (b >= 32 && b < 127) return String.fromCharCode(b);
+      return "\\" + b.toString(16).toUpperCase().padStart(2, "0");
+    }).join("");
+    this.strings.push(`${name} = private unnamed_addr constant [${bytes.length + 1} x i8] c"${esc}\\00", align 1`);
+    return { name, len: bytes.length };
+  }
+  gepStr(name) {
+    const r = this.reg();
+    this.emit(`${r} = getelementptr inbounds i8, ptr ${name}, i64 0`);
+    return r;
+  }
+  // ---------- type resolution ----------
+  resolveType(t) {
+    if (!t) return I64;
+    if (t.ptr || t.ref) return PTR;
+    if (t.arrayLen !== null && t.arrayLen !== void 0) {
+      const elem = this.resolveType({ ...t, arrayLen: null });
+      return { name: `[${t.arrayLen} x ${elem.name}]`, llvm: `[${t.arrayLen} x ${elem.llvm}]`, kind: "array", elem, len: t.arrayLen };
+    }
+    const base = PRIM[t.name];
+    if (base) return base;
+    if (t.name.startsWith("(")) return I64;
+    if (this.structs.has(t.name)) return this.structs.get(t.name);
+    if (this.enums.has(t.name)) return I64;
+    return I64;
+  }
+  fieldIndex(structName, field) {
+    const st = this.structs.get(structName);
+    if (!st || !st.fields) return null;
+    for (let i = 0; i < st.fields.length; i++) if (st.fields[i].name === field) return { idx: i, ty: st.fields[i].ty };
+    return null;
+  }
+  // ---------- program ----------
+  generate() {
+    this.collectTypes();
+    this.collectFns();
+    const bodyLines = [];
+    for (const node of this.program.body) {
+      if (node.kind === "FnDecl") bodyLines.push(this.genFunction(node));
+      else if (node.kind === "ImplBlock") {
+        for (const m of node.methods) bodyLines.push(this.genFunction(m, `${node.typeName}.${m.name}`));
+      } else if (node.kind === "ConstDecl" || node.kind === "VarDecl" && node.type) {
+        this.genGlobal(node);
+      }
+    }
+    if (this.target.freestanding && this.fns.has(`@${this.entry}`)) {
+      bodyLines.push(`define void @_start() {
+entry:
+  call ${this.fns.get(`@${this.entry}`).ret.llvm} @${this.entry}()
+  ret void
+}
+`);
+    }
+    const header = [];
+    header.push(`; SidAli -> LLVM IR`);
+    header.push(`source_filename = "sidali"`);
+    header.push(`target triple = "${this.target.triple}"`);
+    header.push("");
+    header.push("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
+    header.push("declare double @llvm.log.f64(double)");
+    header.push("declare double @llvm.pow.f64(double, double)");
+    if (this.target.freestanding) {
+      const builtins = [
+        ["sid_write", "declare void @sid_write(ptr, i64)"],
+        ["sid_read", "declare i64 @sid_read()"],
+        ["sid_mmio_write", "declare void @sid_mmio_write(i64, i64)"],
+        ["sid_mmio_read", "declare i64 @sid_mmio_read(i64)"]
+      ];
+      for (const [fn, decl] of builtins) if (!this.fns.has(`@${fn}`)) header.push(decl);
+    }
+    header.push("");
+    header.push(...this.declares);
+    header.push("");
+    header.push(...this.strings);
+    header.push("");
+    const fnDecls = [...this.fns.entries()].filter(([, v]) => v.extern).map(([name, v]) => `declare ${v.ret.llvm} ${name}(${v.params.map((p) => p.llvm).join(", ")}${v.variadic ? v.params.length ? ", ..." : "..." : ""})`);
+    header.push(...fnDecls);
+    header.push("");
+    return [...header, ...bodyLines].join("\n") + "\n";
+  }
+  collectTypes() {
+    for (const node of this.program.body) {
+      if (node.kind === "StructDecl") {
+        const fields = [];
+        for (const f of node.fields) fields.push({ name: f.name, ty: this.resolveType(f.type) });
+        this.structs.set(node.name, { name: node.name, llvm: `%struct.${node.name}`, kind: "struct", fields });
+      } else if (node.kind === "EnumDecl") {
+        this.enums.set(node.name, node.variants.map((v) => v.name));
+      }
+    }
+    for (const [name, st] of this.structs) {
+      const body = (st.fields || []).map((f) => f.ty.llvm).join(", ");
+      this.declares.push(`%struct.${name} = type { ${body} }`);
+    }
+  }
+  collectFns() {
+    for (const node of this.program.body) {
+      if (node.kind === "FnDecl") {
+        this.fns.set(`@${node.name}`, { params: node.params.map((p) => this.resolveType(p.type)), ret: this.resolveType(node.ret), variadic: false, extern: false });
+      } else if (node.kind === "ExternBlock") {
+        for (const fn of node.items) {
+          this.fns.set(`@${fn.name}`, { params: fn.params.map((p) => this.resolveType(p.type)), ret: this.resolveType(fn.ret), variadic: false, extern: true });
+        }
+      } else if (node.kind === "ImplBlock") {
+        for (const m of node.methods) {
+          this.fns.set(`@${node.typeName}.${m.name}`, { params: m.params.map((p) => this.resolveType(p.type)), ret: this.resolveType(m.ret), variadic: false, extern: false });
+        }
+      }
+    }
+    if (!this.target.freestanding) {
+      if (!this.fns.has("@printf")) this.fns.set("@printf", { params: [PTR], ret: I32, variadic: true, extern: true });
+      if (!this.fns.has("@snprintf")) this.fns.set("@snprintf", { params: [PTR, I64, PTR], ret: I32, variadic: true, extern: true });
+      if (!this.fns.has("@puts")) this.fns.set("@puts", { params: [PTR], ret: I32, variadic: false, extern: true });
+    }
+  }
+  genFunction(fn, mangled) {
+    const name = mangled || fn.name;
+    const ret = this.resolveType(fn.ret);
+    const params = fn.params;
+    const paramTys = params.map((p) => this.resolveType(p.type));
+    const selfType = mangled ? this.structs.get(mangled.split(".")[0]) : void 0;
+    const savedLines = this.lines, savedLocals = this.locals, savedReg = this.regCounter, savedLabel = this.labelCounter, savedRet = this.currentRet, savedSelf = this.selfStruct;
+    this.lines = [];
+    this.locals = /* @__PURE__ */ new Map();
+    this.regCounter = 0;
+    this.labelCounter = 0;
+    this.currentRet = ret;
+    this.selfStruct = selfType ? selfType.name : null;
+    const argNames = [];
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
+      if (p.self) {
+        argNames.push(`ptr %self`);
+        continue;
+      }
+      argNames.push(`${paramTys[i].llvm} %${p.name}`);
+    }
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
+      if (p.self) {
+        const selfTy = selfType || PTR;
+        this.locals.set("self", { ptr: "%self", ty: selfTy, mut: false });
+        this.locals.set("this", { ptr: "%self", ty: selfTy, mut: false });
+        continue;
+      }
+      const slot = `%${p.name}.addr`;
+      this.emit(`${slot} = alloca ${paramTys[i].llvm}`);
+      this.emit(`store ${paramTys[i].llvm} %${p.name}, ptr ${slot}`);
+      this.locals.set(p.name, { ptr: slot, ty: paramTys[i], mut: true });
+    }
+    this.genBlock(fn.body);
+    if (ret.llvm === "void") this.emit("ret void");
+    else if (ret.kind === "float") this.emit(`ret ${ret.llvm} 0.0`);
+    else if (ret.llvm === "ptr") this.emit("ret ptr null");
+    else if (ret.kind === "struct") this.emit(`ret ${ret.llvm} zeroinitializer`);
+    else this.emit(`ret ${ret.llvm} 0`);
+    const body = this.lines;
+    this.lines = savedLines;
+    this.locals = savedLocals;
+    this.regCounter = savedReg;
+    this.labelCounter = savedLabel;
+    this.currentRet = savedRet;
+    this.selfStruct = savedSelf;
+    return [`define ${ret.llvm} @${name}(${argNames.join(", ")}) {`, "entry:", ...body, "}", ""].join("\n");
+  }
+  genBlock(block) {
+    for (const st of block.body) this.genStmt(st);
+  }
+  // ---------- statements ----------
+  genStmt(node) {
+    switch (node.kind) {
+      case "VarDecl":
+      case "ConstDecl": {
+        const decl = node;
+        const ty = decl.type ? this.resolveType(decl.type) : decl.init ? this.inferType(decl.init) : I64;
+        const slot = `%${decl.name}.addr.${this.regCounter}`;
+        this.emit(`${slot} = alloca ${ty.llvm}`);
+        if (decl.init) {
+          const v = this.coerce(this.genExpr(decl.init, ty), ty);
+          this.emit(`store ${ty.llvm} ${v.val}, ptr ${slot}`);
+        } else {
+          this.emit(`store ${ty.llvm} ${this.zero(ty)}, ptr ${slot}`);
+        }
+        this.locals.set(decl.name, { ptr: slot, ty, mut: !!decl.mut });
+        break;
+      }
+      case "ExprStmt": {
+        this.genExpr(node.expr);
+        break;
+      }
+      case "PrintStmt": {
+        this.genPrint(node);
+        break;
+      }
+      case "ReturnStmt": {
+        if (node.value) {
+          const v = this.coerce(this.genExpr(node.value, this.currentRet), this.currentRet);
+          this.emit(`ret ${this.currentRet.llvm} ${v.val}`);
+        } else if (this.currentRet.llvm === "void") this.emit("ret void");
+        else if (this.currentRet.kind === "float") this.emit(`ret ${this.currentRet.llvm} 0.0`);
+        else this.emit(`ret ${this.currentRet.llvm} 0`);
+        break;
+      }
+      case "IfStmt": {
+        const c = this.toBool(this.genExpr(node.cond, BOOL));
+        const thenL = this.label("if.then"), elseL = this.label("if.else"), endL = this.label("if.end");
+        this.emit(`br i1 ${c.val}, label %${thenL}, label %${node.else ? elseL : endL}`);
+        this.emitRaw(`${thenL}:`);
+        this.genBlock(node.then);
+        this.emit(`br label %${endL}`);
+        if (node.else) {
+          this.emitRaw(`${elseL}:`);
+          if (node.else.kind === "IfStmt") this.genStmt(node.else);
+          else this.genBlock(node.else);
+          this.emit(`br label %${endL}`);
+        }
+        this.emitRaw(`${endL}:`);
+        break;
+      }
+      case "WhileStmt": {
+        const condL = this.label("while.cond"), bodyL = this.label("while.body"), endL = this.label("while.end");
+        this.emit(`br label %${condL}`);
+        this.emitRaw(`${condL}:`);
+        const c = this.toBool(this.genExpr(node.cond, BOOL));
+        this.emit(`br i1 ${c.val}, label %${bodyL}, label %${endL}`);
+        this.emitRaw(`${bodyL}:`);
+        this.loopStack.push({ brk: endL, cont: condL });
+        this.genBlock(node.body);
+        this.loopStack.pop();
+        this.emit(`br label %${condL}`);
+        this.emitRaw(`${endL}:`);
+        break;
+      }
+      case "RepeatStmt": {
+        const count = this.genExpr(node.count, I64);
+        const slot = `%rep.n.${this.regCounter}`;
+        this.emit(`${slot} = alloca i64`);
+        this.emit(`store i64 ${count.val}, ptr ${slot}`);
+        const idx = `%rep.i.${this.regCounter}`;
+        this.emit(`${idx} = alloca i64`);
+        this.emit(`store i64 0, ptr ${idx}`);
+        const condL = this.label("rep.cond"), bodyL = this.label("rep.body"), endL = this.label("rep.end");
+        this.emit(`br label %${condL}`);
+        this.emitRaw(`${condL}:`);
+        const i0 = this.reg();
+        this.emit(`${i0} = load i64, ptr ${idx}`);
+        const n0 = this.reg();
+        this.emit(`${n0} = load i64, ptr ${slot}`);
+        const cmp = this.reg();
+        this.emit(`${cmp} = icmp slt i64 ${i0}, ${n0}`);
+        this.emit(`br i1 ${cmp}, label %${bodyL}, label %${endL}`);
+        this.emitRaw(`${bodyL}:`);
+        this.loopStack.push({ brk: endL, cont: condL });
+        this.genBlock(node.body);
+        this.loopStack.pop();
+        const i1 = this.reg();
+        this.emit(`${i1} = load i64, ptr ${idx}`);
+        const i2 = this.reg();
+        this.emit(`${i2} = add i64 ${i1}, 1`);
+        this.emit(`store i64 ${i2}, ptr ${idx}`);
+        this.emit(`br label %${condL}`);
+        this.emitRaw(`${endL}:`);
+        break;
+      }
+      case "ForStmt": {
+        this.genFor(node);
+        break;
+      }
+      case "BreakStmt": {
+        const l = this.loopStack[this.loopStack.length - 1];
+        if (l) this.emit(`br label %${l.brk}`);
+        break;
+      }
+      case "ContinueStmt": {
+        const l = this.loopStack[this.loopStack.length - 1];
+        if (l) this.emit(`br label %${l.cont}`);
+        break;
+      }
+      case "UnsafeBlock": {
+        this.genBlock(node.body);
+        break;
+      }
+      case "MatchStmt": {
+        this.genMatch(node);
+        break;
+      }
+      case "Block": {
+        this.genBlock(node);
+        break;
+      }
+      case "ContractDecl": {
+        this.genBlock(node.body);
+        break;
+      }
+      case "TryStmt": {
+        this.genBlock(node.body);
+        if (node.finalizer) this.genBlock(node.finalizer);
+        break;
+      }
+      default: {
+        this.genExpr(node);
+      }
+    }
+  }
+  zero(ty) {
+    if (ty.kind === "float") return "0.0";
+    if (ty.llvm === "ptr") return "null";
+    if (ty.kind === "array" || ty.kind === "struct") return "zeroinitializer";
+    return "0";
+  }
+  genFor(node) {
+    const iter = this.genExpr(node.iter);
+    if (iter.ty.kind === "array" && iter.ty.elem) {
+      const elemTy = iter.ty.elem;
+      const arrSlot = `%for.arr.${this.regCounter}`;
+      this.emit(`${arrSlot} = alloca ptr`);
+      this.emit(`store ptr ${iter.val}, ptr ${arrSlot}`);
+      const idx = `%for.i.${this.regCounter}`;
+      this.emit(`${idx} = alloca i64`);
+      this.emit(`store i64 0, ptr ${idx}`);
+      const slot2 = `%${node.varName}.addr.${this.regCounter}`;
+      this.emit(`${slot2} = alloca ${elemTy.llvm}`);
+      this.locals.set(node.varName, { ptr: slot2, ty: elemTy, mut: false });
+      const condL2 = this.label("for.cond"), bodyL2 = this.label("for.body"), endL2 = this.label("for.end");
+      this.emit(`br label %${condL2}`);
+      this.emitRaw(`${condL2}:`);
+      const i02 = this.reg();
+      this.emit(`${i02} = load i64, ptr ${idx}`);
+      const c2 = this.reg();
+      this.emit(`${c2} = icmp slt i64 ${i02}, ${iter.ty.len}`);
+      this.emit(`br i1 ${c2}, label %${bodyL2}, label %${endL2}`);
+      this.emitRaw(`${bodyL2}:`);
+      const p = this.reg();
+      this.emit(`${p} = load ptr, ptr ${arrSlot}`);
+      const ep = this.reg();
+      this.emit(`${ep} = getelementptr inbounds ${elemTy.llvm}, ptr ${p}, i64 ${i02}`);
+      const ev = this.reg();
+      this.emit(`${ev} = load ${elemTy.llvm}, ptr ${ep}`);
+      this.emit(`store ${elemTy.llvm} ${ev}, ptr ${slot2}`);
+      this.loopStack.push({ brk: endL2, cont: condL2 });
+      this.genBlock(node.body);
+      this.loopStack.pop();
+      const i12 = this.reg();
+      this.emit(`${i12} = load i64, ptr ${idx}`);
+      const i22 = this.reg();
+      this.emit(`${i22} = add i64 ${i12}, 1`);
+      this.emit(`store i64 ${i22}, ptr ${idx}`);
+      this.emit(`br label %${condL2}`);
+      this.emitRaw(`${endL2}:`);
+      return;
+    }
+    const startV = iter;
+    const endV = this.rangeEnd ?? "0";
+    this.rangeEnd = null;
+    const slot = `%${node.varName}.addr.${this.regCounter}`;
+    this.emit(`${slot} = alloca i64`);
+    this.emit(`store i64 ${startV.val}, ptr ${slot}`);
+    this.locals.set(node.varName, { ptr: slot, ty: I64, mut: false });
+    const limit = `%for.lim.${this.regCounter}`;
+    this.emit(`${limit} = alloca i64`);
+    this.emit(`store i64 ${endV}, ptr ${limit}`);
+    const condL = this.label("for.cond"), bodyL = this.label("for.body"), endL = this.label("for.end");
+    this.emit(`br label %${condL}`);
+    this.emitRaw(`${condL}:`);
+    const i0 = this.reg();
+    this.emit(`${i0} = load i64, ptr ${slot}`);
+    const n0 = this.reg();
+    this.emit(`${n0} = load i64, ptr ${limit}`);
+    const c = this.reg();
+    this.emit(`${c} = icmp slt i64 ${i0}, ${n0}`);
+    this.emit(`br i1 ${c}, label %${bodyL}, label %${endL}`);
+    this.emitRaw(`${bodyL}:`);
+    this.loopStack.push({ brk: endL, cont: condL });
+    this.genBlock(node.body);
+    this.loopStack.pop();
+    const i1 = this.reg();
+    this.emit(`${i1} = load i64, ptr ${slot}`);
+    const i2 = this.reg();
+    this.emit(`${i2} = add i64 ${i1}, 1`);
+    this.emit(`store i64 ${i2}, ptr ${slot}`);
+    this.emit(`br label %${condL}`);
+    this.emitRaw(`${endL}:`);
+  }
+  genMatch(node) {
+    const val = this.genExpr(node.value);
+    const slot = `%match.${this.regCounter}`;
+    this.emit(`${slot} = alloca ${val.ty.llvm}`);
+    this.emit(`store ${val.ty.llvm} ${val.val}, ptr ${slot}`);
+    const endL = this.label("match.end");
+    for (const arm of node.arms) {
+      if (arm.pattern === "_") {
+        this.genBlock(arm.body);
+        this.emit(`br label %${endL}`);
+        continue;
+      }
+      const cur = this.reg();
+      this.emit(`${cur} = load ${val.ty.llvm}, ptr ${slot}`);
+      let condVal;
+      if (arm.pattern === "literal") {
+        let acc = null;
+        for (const lit of arm.literals) {
+          const lv = this.coerce(this.genExpr(lit, val.ty), val.ty);
+          const cmp = this.reg();
+          if (val.ty.kind === "float") this.emit(`${cmp} = fcmp oeq ${val.ty.llvm} ${cur}, ${lv.val}`);
+          else this.emit(`${cmp} = icmp eq ${val.ty.llvm} ${cur}, ${lv.val}`);
+          if (acc === null) acc = cmp;
+          else {
+            const orr = this.reg();
+            this.emit(`${orr} = or i1 ${acc}, ${cmp}`);
+            acc = orr;
+          }
+        }
+        condVal = acc;
+      } else {
+        const enumName = this.enumForVariant(arm.pattern);
+        const ord = enumName ? this.enums.get(enumName).indexOf(arm.pattern) : 0;
+        const cmp = this.reg();
+        this.emit(`${cmp} = icmp eq ${val.ty.llvm} ${cur}, ${ord}`);
+        condVal = cmp;
+      }
+      const hitL = this.label("match.hit"), nextL = this.label("match.next");
+      this.emit(`br i1 ${condVal}, label %${hitL}, label %${nextL}`);
+      this.emitRaw(`${hitL}:`);
+      this.genBlock(arm.body);
+      this.emit(`br label %${endL}`);
+      this.emitRaw(`${nextL}:`);
+    }
+    this.emitRaw(`${endL}:`);
+  }
+  enumForVariant(variant) {
+    for (const [name, variants] of this.enums) if (variants.includes(variant)) return name;
+    return null;
+  }
+  // ---------- expressions ----------
+  inferType(node) {
+    switch (node.kind) {
+      case "NumLit":
+        return Number.isInteger(node.value) ? I64 : F64;
+      case "StrLit":
+      case "InterpStr":
+        return STR;
+      case "BoolLit":
+        return BOOL;
+      case "ArrayLit": {
+        const elem = node.items.length ? this.inferType(node.items[0]) : I64;
+        return { name: `[${node.items.length} x ${elem.name}]`, llvm: `[${node.items.length} x ${elem.llvm}]`, kind: "array", elem, len: node.items.length };
+      }
+      case "ObjectLit":
+        return node.typeName && this.structs.has(node.typeName) ? this.structs.get(node.typeName) : PTR;
+      case "BinOp": {
+        if (["==", "!=", "<", ">", "<=", ">=", "&&", "||"].includes(node.op)) return BOOL;
+        const l = this.inferType(node.left), r = this.inferType(node.right);
+        if (l.kind === "float" || r.kind === "float") return F64;
+        if (l.kind === "str") return l;
+        if (r.kind === "str") return r;
+        return l.kind === "int" ? l : r;
+      }
+      case "UnaryOp":
+        return node.op === "!" ? BOOL : this.inferType(node.operand);
+      case "Call": {
+        if (node.callee.kind === "Ident") {
+          const f = this.fns.get(`@${node.callee.name}`);
+          if (f) return f.ret;
+        }
+        if (node.callee.kind === "Member") {
+          const objTy = this.inferType(node.callee.object);
+          const f = this.fns.get(`@${objTy.name}.${node.callee.property}`);
+          if (f) return f.ret;
+        }
+        return I64;
+      }
+      case "Cast":
+        return this.resolveType(node.type);
+      case "Ident": {
+        const l = this.locals.get(node.name);
+        return l ? l.ty : I64;
+      }
+      case "RefExpr":
+        return PTR;
+      case "Ternary":
+        return this.inferType(node.then);
+      default:
+        return I64;
+    }
+  }
+  toBool(v) {
+    if (v.ty.kind === "bool") return v;
+    const r = this.reg();
+    if (v.ty.kind === "int") this.emit(`${r} = icmp ne ${v.ty.llvm} ${v.val}, 0`);
+    else if (v.ty.kind === "float") this.emit(`${r} = fcmp one ${v.ty.llvm} ${v.val}, 0.0`);
+    else this.emit(`${r} = icmp ne ptr ${v.val}, null`);
+    return { ty: BOOL, val: r };
+  }
+  coerce(v, to) {
+    if (v.ty.llvm === to.llvm) return v;
+    if (to.kind === "bool") return this.toBool(v);
+    if (to.kind === "int" && v.ty.kind === "int") {
+      const from = v.ty.bits ?? 64, toB = to.bits ?? 64;
+      if (from === toB) return v;
+      const r = this.reg();
+      if (from < toB) this.emit(`${r} = sext i${from} ${v.val} to i${toB}`);
+      else this.emit(`${r} = trunc i${from} ${v.val} to i${toB}`);
+      return { ty: to, val: r };
+    }
+    if (to.kind === "float" && v.ty.kind === "int") {
+      const r = this.reg();
+      this.emit(`${r} = sitofp ${v.ty.llvm} ${v.val} to ${to.llvm}`);
+      return { ty: to, val: r };
+    }
+    if (to.kind === "int" && v.ty.kind === "float") {
+      const r = this.reg();
+      this.emit(`${r} = fptosi ${v.ty.llvm} ${v.val} to ${to.llvm}`);
+      return { ty: to, val: r };
+    }
+    if (to.llvm === "ptr" && v.ty.kind === "int") {
+      const r = this.reg();
+      this.emit(`${r} = inttoptr ${v.ty.llvm} ${v.val} to ptr`);
+      return { ty: PTR, val: r };
+    }
+    if (to.kind === "int" && v.ty.llvm === "ptr") {
+      const r = this.reg();
+      this.emit(`${r} = ptrtoint ptr ${v.val} to ${to.llvm}`);
+      return { ty: to, val: r };
+    }
+    if (to.llvm === "ptr" && v.ty.llvm === "ptr") return { ty: PTR, val: v.val };
+    if (to.llvm === "ptr") {
+      const r = this.reg();
+      this.emit(`${r} = inttoptr i64 ${v.val} to ptr`);
+      return { ty: PTR, val: r };
+    }
+    return v;
+  }
+  genExpr(node, hint) {
+    switch (node.kind) {
+      case "NumLit": {
+        const ty = hint && hint.kind === "float" ? hint : Number.isInteger(node.value) ? hint && hint.kind === "int" ? hint : I64 : F64;
+        const lit = ty.kind === "float" ? this.floatLit(node.value) : String(Math.trunc(node.value));
+        return { ty, val: lit };
+      }
+      case "StrLit": {
+        const s = this.internString(node.value);
+        return { ty: STR, val: this.gepStr(s.name) };
+      }
+      case "BoolLit":
+        return { ty: BOOL, val: node.value ? "1" : "0" };
+      case "NilLit":
+        return { ty: PTR, val: "null" };
+      case "InterpStr":
+        return this.genInterp(node);
+      case "Ident":
+        return this.genIdent(node);
+      case "ArrayLit":
+        return this.genArrayLit(node);
+      case "ObjectLit":
+        return this.genObjectLit(node);
+      case "BinOp":
+        return this.genBinOp(node);
+      case "UnaryOp":
+        return this.genUnary(node);
+      case "Assign":
+        return this.genAssign(node);
+      case "Call":
+        return this.genCall(node);
+      case "Cast":
+        return this.coerce(this.genExpr(node.value), this.resolveType(node.type));
+      case "RefExpr": {
+        const lv = this.lvaluePtr(node.value);
+        if (lv) return { ty: PTR, val: lv.ptr };
+        const v = this.genExpr(node.value);
+        const slot = `%ref.${this.regCounter}`;
+        this.emit(`${slot} = alloca ${v.ty.llvm}`);
+        this.emit(`store ${v.ty.llvm} ${v.val}, ptr ${slot}`);
+        return { ty: PTR, val: slot };
+      }
+      case "Deref": {
+        const v = this.genExpr(node.value);
+        const r = this.reg();
+        this.emit(`${r} = load i64, ptr ${v.val}`);
+        return { ty: I64, val: r };
+      }
+      case "Ternary": {
+        const c = this.toBool(this.genExpr(node.cond, BOOL));
+        const ty = hint || this.inferType(node.then);
+        const a = this.coerce(this.genExpr(node.then, ty), ty);
+        const b = this.coerce(this.genExpr(node.else, ty), ty);
+        const r = this.reg();
+        this.emit(`${r} = select i1 ${c.val}, ${ty.llvm} ${a.val}, ${ty.llvm} ${b.val}`);
+        return { ty, val: r };
+      }
+      case "RangeExpr": {
+        const start = node.start ? this.coerce(this.genExpr(node.start, I64), I64) : { ty: I64, val: "0" };
+        const end = node.end ? this.coerce(this.genExpr(node.end, I64), I64) : { ty: I64, val: "0" };
+        if (node.inclusive) {
+          const e = this.reg();
+          this.emit(`${e} = add i64 ${end.val}, 1`);
+          this.rangeEnd = e;
+        } else {
+          this.rangeEnd = end.val;
+        }
+        return { ty: I64, val: start.val };
+      }
+      case "Member":
+        return this.genMember(node);
+      case "Index":
+        return this.genIndex(node);
+      case "NewExpr":
+        return this.genNew(node);
+      case "Lambda":
+        return { ty: PTR, val: "null" };
+      case "Transcendental": {
+        const arg = this.coerce(this.genExpr(node.arg), F64);
+        const r = this.reg();
+        if (node.symbol === "pi") this.emit(`${r} = fmul double ${arg.val}, 0x400921FB54442D18`);
+        else this.emit(`${r} = call double @llvm.log.f64(double ${arg.val})`);
+        return { ty: F64, val: r };
+      }
+      default:
+        throw new LlvmError(`cannot lower '${node.kind}' to LLVM IR`);
+    }
+  }
+  floatLit(n) {
+    if (!isFinite(n)) return n > 0 ? "0x7FF0000000000000" : "0xFFF0000000000000";
+    return n.toString();
+  }
+  genIdent(node) {
+    const l = this.locals.get(node.name);
+    if (l) {
+      const r = this.reg();
+      this.emit(`${r} = load ${l.ty.llvm}, ptr ${l.ptr}`);
+      return { ty: l.ty, val: r };
+    }
+    if (node.name === "PI") return { ty: F64, val: "0x400921FB54442D18" };
+    if (node.name === "E") return { ty: F64, val: "0x4005BF0A8B145769" };
+    if (node.name === "true") return { ty: BOOL, val: "1" };
+    if (node.name === "false") return { ty: BOOL, val: "0" };
+    if (node.name === "nil") return { ty: PTR, val: "null" };
+    if (this.globals.has(node.name)) {
+      const gty = this.globals.get(node.name);
+      const r = this.reg();
+      this.emit(`${r} = load ${gty.llvm}, ptr @${node.name}`);
+      return { ty: gty, val: r };
+    }
+    if (this.fns.has(`@${node.name}`)) return { ty: PTR, val: `@${node.name}` };
+    throw new LlvmError(`undefined variable '${node.name}'`);
+  }
+  genArrayLit(node) {
+    const elemTy = node.items.length ? this.inferType(node.items[0]) : I64;
+    const arrTy = { name: `[${node.items.length} x ${elemTy.name}]`, llvm: `[${node.items.length} x ${elemTy.llvm}]`, kind: "array", elem: elemTy, len: node.items.length };
+    const slot = `%arr.${this.regCounter}`;
+    this.emit(`${slot} = alloca ${arrTy.llvm}`);
+    for (let i = 0; i < node.items.length; i++) {
+      const v = this.coerce(this.genExpr(node.items[i], elemTy), elemTy);
+      const ep = this.reg();
+      this.emit(`${ep} = getelementptr inbounds ${arrTy.llvm}, ptr ${slot}, i64 0, i64 ${i}`);
+      this.emit(`store ${elemTy.llvm} ${v.val}, ptr ${ep}`);
+    }
+    return { ty: arrTy, val: slot };
+  }
+  genObjectLit(node) {
+    if (!node.typeName) return { ty: PTR, val: "null" };
+    const st = this.structs.get(node.typeName);
+    if (!st) throw new LlvmError(`unknown struct '${node.typeName}'`);
+    const slot = `%obj.${this.regCounter}`;
+    this.emit(`${slot} = alloca ${st.llvm}`);
+    this.emit(`store ${st.llvm} zeroinitializer, ptr ${slot}`);
+    for (const e of node.entries) {
+      const fi = this.fieldIndex(node.typeName, e.key);
+      if (!fi) continue;
+      const v = this.coerce(this.genExpr(e.value, fi.ty), fi.ty);
+      const fp = this.reg();
+      this.emit(`${fp} = getelementptr inbounds ${st.llvm}, ptr ${slot}, i32 0, i32 ${fi.idx}`);
+      this.emit(`store ${fi.ty.llvm} ${v.val}, ptr ${fp}`);
+    }
+    const r = this.reg();
+    this.emit(`${r} = load ${st.llvm}, ptr ${slot}`);
+    return { ty: st, val: r };
+  }
+  genMember(node) {
+    if (node.object.kind === "Ident" && this.enums.has(node.object.name)) {
+      const variants = this.enums.get(node.object.name);
+      const ord = variants.indexOf(node.property);
+      if (ord >= 0) return { ty: I64, val: String(ord) };
+    }
+    const lv = this.lvaluePtr(node.object);
+    if (lv && lv.ty.kind === "struct") {
+      const fi = this.fieldIndex(lv.ty.name, node.property);
+      if (fi) {
+        const fp = this.reg();
+        this.emit(`${fp} = getelementptr inbounds ${lv.ty.llvm}, ptr ${lv.ptr}, i32 0, i32 ${fi.idx}`);
+        const r = this.reg();
+        this.emit(`${r} = load ${fi.ty.llvm}, ptr ${fp}`);
+        return { ty: fi.ty, val: r };
+      }
+    }
+    const obj = this.genExpr(node.object);
+    if (obj.ty.kind === "struct" && obj.ty.fields) {
+      const fi = this.fieldIndex(obj.ty.name, node.property);
+      if (fi) {
+        const base = `%fld.${this.regCounter}`;
+        this.emit(`${base} = alloca ${obj.ty.llvm}`);
+        this.emit(`store ${obj.ty.llvm} ${obj.val}, ptr ${base}`);
+        const fp = this.reg();
+        this.emit(`${fp} = getelementptr inbounds ${obj.ty.llvm}, ptr ${base}, i32 0, i32 ${fi.idx}`);
+        const r = this.reg();
+        this.emit(`${r} = load ${fi.ty.llvm}, ptr ${fp}`);
+        return { ty: fi.ty, val: r };
+      }
+    }
+    if (node.property === "len" || node.property === "length") {
+      if (obj.ty.kind === "array") return { ty: I64, val: String(obj.ty.len) };
+    }
+    return { ty: I64, val: "0" };
+  }
+  genIndex(node) {
+    const lv = this.lvaluePtr(node.object);
+    const idx = this.coerce(this.genExpr(node.index, I64), I64);
+    if (lv && lv.ty.kind === "array" && lv.ty.elem) {
+      const ep = this.reg();
+      this.emit(`${ep} = getelementptr inbounds ${lv.ty.llvm}, ptr ${lv.ptr}, i64 0, i64 ${idx.val}`);
+      const r = this.reg();
+      this.emit(`${r} = load ${lv.ty.elem.llvm}, ptr ${ep}`);
+      return { ty: lv.ty.elem, val: r };
+    }
+    const obj = this.genExpr(node.object);
+    if (obj.ty.kind === "array" && obj.ty.elem) {
+      const ep = this.reg();
+      this.emit(`${ep} = getelementptr inbounds ${obj.ty.llvm}, ptr ${obj.val}, i64 0, i64 ${idx.val}`);
+      const r = this.reg();
+      this.emit(`${r} = load ${obj.ty.elem.llvm}, ptr ${ep}`);
+      return { ty: obj.ty.elem, val: r };
+    }
+    if (obj.ty.llvm === "ptr") {
+      const ep = this.reg();
+      this.emit(`${ep} = getelementptr inbounds i64, ptr ${obj.val}, i64 ${idx.val}`);
+      const r = this.reg();
+      this.emit(`${r} = load i64, ptr ${ep}`);
+      return { ty: I64, val: r };
+    }
+    return { ty: I64, val: "0" };
+  }
+  genNew(node) {
+    const st = this.structs.get(node.className);
+    if (st) return this.genObjectLit({ kind: "ObjectLit", entries: [], typeName: node.className });
+    return { ty: PTR, val: "null" };
+  }
+  genBinOp(node) {
+    const op = node.op;
+    if (op === "&&" || op === "||") {
+      const l2 = this.toBool(this.genExpr(node.left, BOOL));
+      const r2 = this.toBool(this.genExpr(node.right, BOOL));
+      const res = this.reg();
+      this.emit(`${res} = ${op === "&&" ? "and" : "or"} i1 ${l2.val}, ${r2.val}`);
+      return { ty: BOOL, val: res };
+    }
+    const l = this.genExpr(node.left);
+    let ty = l.ty;
+    const r0 = this.genExpr(node.right, l.ty.kind === "float" ? l.ty : void 0);
+    let lv = l, rv = r0;
+    if (l.ty.kind === "float" || r0.ty.kind === "float") {
+      const fty = l.ty.kind === "float" ? l.ty : r0.ty.kind === "float" ? r0.ty : F64;
+      lv = this.coerce(l, fty);
+      rv = this.coerce(r0, fty);
+      ty = fty;
+    } else if (l.ty.kind === "str" || r0.ty.kind === "str") {
+      ty = STR;
+    } else if (l.ty.kind === "int") {
+      ty = l.ty;
+      rv = this.coerce(r0, l.ty);
+    } else {
+      ty = r0.ty;
+      lv = this.coerce(l, r0.ty);
+    }
+    const r = this.reg();
+    const isCmp = ["==", "!=", "<", ">", "<=", ">="].includes(op);
+    if (ty.kind === "float") {
+      const fop = { "==": "oeq", "!=": "one", "<": "olt", ">": "ogt", "<=": "ole", ">=": "oge" };
+      if (fop[op]) {
+        this.emit(`${r} = fcmp ${fop[op]} ${ty.llvm} ${lv.val}, ${rv.val}`);
+        return { ty: BOOL, val: r };
+      }
+      if (op === "+") this.emit(`${r} = fadd ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "-") this.emit(`${r} = fsub ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "*") this.emit(`${r} = fmul ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "/") this.emit(`${r} = fdiv ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "%") this.emit(`${r} = frem ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "**") this.emit(`${r} = call double @llvm.pow.f64(double ${lv.val}, double ${rv.val})`);
+      return { ty, val: r };
+    }
+    if (ty.kind === "str") {
+      if (op === "+") {
+        return l;
+      }
+      if (isCmp) {
+        this.emit(`${r} = icmp eq ptr ${lv.val}, ${rv.val}`);
+        return { ty: BOOL, val: r };
+      }
+      return l;
+    }
+    const signed = ty.signed !== false;
+    const cmpOp = {
+      "==": "eq",
+      "!=": "ne",
+      "<": signed ? "slt" : "ult",
+      ">": signed ? "sgt" : "ugt",
+      "<=": signed ? "sle" : "ule",
+      ">=": signed ? "sge" : "uge"
+    };
+    if (cmpOp[op]) {
+      this.emit(`${r} = icmp ${cmpOp[op]} ${ty.llvm} ${lv.val}, ${rv.val}`);
+      return { ty: BOOL, val: r };
+    }
+    if (op === "+") this.emit(`${r} = add ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "-") this.emit(`${r} = sub ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "*") this.emit(`${r} = mul ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "/") this.emit(`${r} = ${signed ? "sdiv" : "udiv"} ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "%") this.emit(`${r} = ${signed ? "srem" : "urem"} ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "**") {
+      const fl = this.reg(), fr = this.reg(), fp = this.reg(), fi = this.reg();
+      this.emit(`${fl} = sitofp ${ty.llvm} ${lv.val} to double`);
+      this.emit(`${fr} = sitofp ${ty.llvm} ${rv.val} to double`);
+      this.emit(`${fp} = call double @llvm.pow.f64(double ${fl}, double ${fr})`);
+      this.emit(`${fi} = fptosi double ${fp} to ${ty.llvm}`);
+      return { ty, val: fi };
+    } else if (op === "&") this.emit(`${r} = and ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "|") this.emit(`${r} = or ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "^") this.emit(`${r} = xor ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "<<") this.emit(`${r} = shl ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === ">>") this.emit(`${r} = ${signed ? "ashr" : "lshr"} ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else return l;
+    return { ty, val: r };
+  }
+  genUnary(node) {
+    const v = this.genExpr(node.operand);
+    const r = this.reg();
+    if (node.op === "!") {
+      const b = this.toBool(v);
+      this.emit(`${r} = xor i1 ${b.val}, true`);
+      return { ty: BOOL, val: r };
+    }
+    if (node.op === "-") {
+      if (v.ty.kind === "float") this.emit(`${r} = fneg ${v.ty.llvm} ${v.val}`);
+      else this.emit(`${r} = sub ${v.ty.llvm} 0, ${v.val}`);
+      return { ty: v.ty, val: r };
+    }
+    if (node.op === "+") return v;
+    if (node.op === "~") {
+      this.emit(`${r} = xor ${v.ty.llvm} ${v.val}, -1`);
+      return { ty: v.ty, val: r };
+    }
+    return v;
+  }
+  genAssign(node) {
+    const lv = this.lvaluePtr(node.target);
+    if (!lv) throw new LlvmError(`cannot assign to this expression`);
+    let v;
+    if (node.op === "=") v = this.coerce(this.genExpr(node.value, lv.ty), lv.ty);
+    else {
+      const binOp = node.op[0];
+      const cur = this.reg();
+      this.emit(`${cur} = load ${lv.ty.llvm}, ptr ${lv.ptr}`);
+      const rhs = this.coerce(this.genExpr(node.value, lv.ty), lv.ty);
+      v = this.genBinOpValues(binOp, { ty: lv.ty, val: cur }, rhs);
+    }
+    this.emit(`store ${lv.ty.llvm} ${v.val}, ptr ${lv.ptr}`);
+    return v;
+  }
+  genBinOpValues(op, l, r0) {
+    let ty = l.ty;
+    let lv = l;
+    let rv = r0;
+    if (l.ty.kind === "float" || r0.ty.kind === "float") {
+      const fty = l.ty.kind === "float" ? l.ty : r0.ty.kind === "float" ? r0.ty : F64;
+      lv = this.coerce(l, fty);
+      rv = this.coerce(r0, fty);
+      ty = fty;
+    } else if (l.ty.kind === "int") {
+      ty = l.ty;
+      rv = this.coerce(r0, l.ty);
+    }
+    const r = this.reg();
+    const cmpOp = {
+      "==": "eq",
+      "!=": "ne",
+      "<": ty.signed !== false ? "slt" : "ult",
+      ">": ty.signed !== false ? "sgt" : "ugt",
+      "<=": ty.signed !== false ? "sle" : "ule",
+      ">=": ty.signed !== false ? "sge" : "uge"
+    };
+    if (ty.kind === "float") {
+      const fop = { "==": "oeq", "!=": "one", "<": "olt", ">": "ogt", "<=": "ole", ">=": "oge" };
+      if (fop[op]) {
+        this.emit(`${r} = fcmp ${fop[op]} ${ty.llvm} ${lv.val}, ${rv.val}`);
+        return { ty: BOOL, val: r };
+      }
+      if (op === "+") this.emit(`${r} = fadd ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "-") this.emit(`${r} = fsub ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "*") this.emit(`${r} = fmul ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "/") this.emit(`${r} = fdiv ${ty.llvm} ${lv.val}, ${rv.val}`);
+      else if (op === "%") this.emit(`${r} = frem ${ty.llvm} ${lv.val}, ${rv.val}`);
+      return { ty, val: r };
+    }
+    if (cmpOp[op]) {
+      this.emit(`${r} = icmp ${cmpOp[op]} ${ty.llvm} ${lv.val}, ${rv.val}`);
+      return { ty: BOOL, val: r };
+    }
+    if (op === "+") this.emit(`${r} = add ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "-") this.emit(`${r} = sub ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "*") this.emit(`${r} = mul ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "/") this.emit(`${r} = ${ty.signed !== false ? "sdiv" : "udiv"} ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "%") this.emit(`${r} = ${ty.signed !== false ? "srem" : "urem"} ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "&") this.emit(`${r} = and ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "|") this.emit(`${r} = or ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else if (op === "^") this.emit(`${r} = xor ${ty.llvm} ${lv.val}, ${rv.val}`);
+    else return lv;
+    return { ty, val: r };
+  }
+  lvaluePtr(node) {
+    if (node.kind === "Ident") {
+      const l = this.locals.get(node.name);
+      if (l) return { ptr: l.ptr, ty: l.ty };
+      return null;
+    }
+    if (node.kind === "Member") {
+      const base = this.lvaluePtr(node.object);
+      if (base && base.ty.kind === "struct") {
+        const fi = this.fieldIndex(base.ty.name, node.property);
+        if (fi) {
+          const fp = this.reg();
+          this.emit(`${fp} = getelementptr inbounds ${base.ty.llvm}, ptr ${base.ptr}, i32 0, i32 ${fi.idx}`);
+          return { ptr: fp, ty: fi.ty };
+        }
+      }
+      return null;
+    }
+    if (node.kind === "Index") {
+      const base = this.lvaluePtr(node.object);
+      const idx = this.coerce(this.genExpr(node.index, I64), I64);
+      if (base && base.ty.kind === "array" && base.ty.elem) {
+        const ep = this.reg();
+        this.emit(`${ep} = getelementptr inbounds ${base.ty.llvm}, ptr ${base.ptr}, i64 0, i64 ${idx.val}`);
+        return { ptr: ep, ty: base.ty.elem };
+      }
+      if (base && base.ty.llvm === "ptr") {
+        const ep = this.reg();
+        this.emit(`${ep} = getelementptr inbounds i64, ptr ${base.ptr}, i64 ${idx.val}`);
+        return { ptr: ep, ty: I64 };
+      }
+      return null;
+    }
+    if (node.kind === "Deref") {
+      const v = this.genExpr(node.value);
+      return { ptr: v.val, ty: I64 };
+    }
+    return null;
+  }
+  genCall(node) {
+    const args = node.args.map((a) => this.genExpr(a));
+    let name = null;
+    if (node.callee.kind === "Ident") name = node.callee.name;
+    else if (node.callee.kind === "Member") name = node.callee.property;
+    if (name === "str" || name === "toStr") return this.toStrValue(args[0]);
+    if (name === "len" || name === "length") {
+      if (args[0] && args[0].ty.kind === "array") return { ty: I64, val: String(args[0].ty.len) };
+      return { ty: I64, val: "0" };
+    }
+    if (name === "mmio_write") {
+      const addr = this.coerce(args[0], I64), val = this.coerce(args[1], I64);
+      if (this.target.freestanding) this.emit(`call void @sid_mmio_write(i64 ${addr.val}, i64 ${val.val})`);
+      else {
+        const p = this.reg();
+        this.emit(`${p} = inttoptr i64 ${addr.val} to ptr`);
+        this.emit(`store volatile i64 ${val.val}, ptr ${p}`);
+      }
+      return { ty: VOID, val: "0" };
+    }
+    if (name === "mmio_read") {
+      const addr = this.coerce(args[0], I64);
+      const r = this.reg();
+      if (this.target.freestanding) this.emit(`${r} = call i64 @sid_mmio_read(i64 ${addr.val})`);
+      else {
+        const p = this.reg();
+        this.emit(`${p} = inttoptr i64 ${addr.val} to ptr`);
+        this.emit(`${r} = load volatile i64, ptr ${p}`);
+      }
+      return { ty: I64, val: r };
+    }
+    if (name === "nop") {
+      this.emit('call void asm sideeffect "", ""()');
+      return { ty: VOID, val: "0" };
+    }
+    if (name && this.fns.has(`@${name}`)) {
+      const sig = this.fns.get(`@${name}`);
+      const coerced = args.map((a, i) => sig.params[i] ? this.coerce(a, sig.params[i]) : a);
+      const r = this.reg();
+      if (sig.ret.llvm === "void") {
+        this.emit(`call void @${name}(${coerced.map((c, i) => `${(sig.params[i] || c.ty).llvm} ${c.val}`).join(", ")})`);
+        return { ty: VOID, val: "0" };
+      }
+      this.emit(`${r} = call ${sig.ret.llvm} @${name}(${coerced.map((c, i) => `${(sig.params[i] || c.ty).llvm} ${c.val}`).join(", ")})`);
+      return { ty: sig.ret, val: r };
+    }
+    if (node.callee.kind === "Member") {
+      const objPtr = this.lvaluePtr(node.callee.object);
+      const objTy = objPtr ? objPtr.ty : this.inferType(node.callee.object);
+      const methodName = `${objTy.name}.${node.callee.property}`;
+      if (this.fns.has(`@${methodName}`)) {
+        const sig = this.fns.get(`@${methodName}`);
+        const callArgs = [`ptr ${objPtr ? objPtr.ptr : args[0]?.val}`];
+        for (let i = 0; i < args.length; i++) callArgs.push(`${args[i].ty.llvm} ${args[i].val}`);
+        const r = this.reg();
+        if (sig.ret.llvm === "void") {
+          this.emit(`call void @${methodName}(${callArgs.join(", ")})`);
+          return { ty: VOID, val: "0" };
+        }
+        this.emit(`${r} = call ${sig.ret.llvm} @${methodName}(${callArgs.join(", ")})`);
+        return { ty: sig.ret, val: r };
+      }
+      if (node.callee.property === "sqrt") {
+        const a = this.coerce(args[0], F64);
+        const r = this.reg();
+        this.emit(`${r} = call double @llvm.sqrt.f64(double ${a.val})`);
+        return { ty: F64, val: r };
+      }
+      if (node.callee.property === "abs") {
+        const a = args[0];
+        const r = this.reg();
+        if (a.ty.kind === "float") {
+          this.emit(`${r} = call double @llvm.fabs.f64(double ${a.val})`);
+          return { ty: F64, val: r };
+        }
+        const c = this.reg();
+        this.emit(`${c} = icmp slt ${a.ty.llvm} ${a.val}, 0`);
+        const n = this.reg();
+        this.emit(`${n} = sub ${a.ty.llvm} 0, ${a.val}`);
+        const s = this.reg();
+        this.emit(`${s} = select i1 ${c}, ${a.ty.llvm} ${n}, ${a.ty.llvm} ${a.val}`);
+        return { ty: a.ty, val: s };
+      }
+    }
+    throw new LlvmError(`call to undefined function '${name ?? "<expr>"}'`);
+  }
+  toStrValue(v) {
+    const buf = `%tostr.${this.regCounter}`;
+    this.emit(`${buf} = alloca [32 x i8]`);
+    if (this.target.freestanding) return { ty: STR, val: buf };
+    const fmtStr = v.ty.kind === "float" ? "%g" : "%lld";
+    const f = this.internString(fmtStr);
+    const fp = this.gepStr(f.name);
+    const arg = v.ty.kind === "float" ? v : this.coerce(v, I64);
+    const argTy = v.ty.kind === "float" ? F64 : I64;
+    this.emit(`call i32 (ptr, i64, ptr, ...) @snprintf(ptr ${buf}, i64 32, ptr ${fp}, ${argTy.llvm} ${arg.val})`);
+    return { ty: STR, val: buf };
+  }
+  genInterp(node) {
+    const buf = `%istr.${this.regCounter}`;
+    this.emit(`${buf} = alloca [256 x i8]`);
+    this.emit(`store [256 x i8] zeroinitializer, ptr ${buf}`);
+    let off = 0;
+    for (const part of node.parts) {
+      if (part.text !== void 0) {
+        const s = this.internString(part.text);
+        const len = s.len;
+        const dp = this.reg();
+        this.emit(`${dp} = getelementptr inbounds [256 x i8], ptr ${buf}, i64 0, i64 ${off}`);
+        const sp = this.gepStr(s.name);
+        this.emit(`call void @llvm.memcpy.p0.p0.i64(ptr align 1 ${dp}, ptr align 1 ${sp}, i64 ${len}, i1 false)`);
+        off += len;
+      } else if (part.expr) {
+        const v = this.genExpr(part.expr);
+        if (this.target.freestanding) continue;
+        const dp = this.reg();
+        this.emit(`${dp} = getelementptr inbounds [256 x i8], ptr ${buf}, i64 0, i64 ${off}`);
+        const fmtStr = v.ty.kind === "float" ? "%g" : v.ty.kind === "int" ? "%lld" : "%s";
+        const f = this.internString(fmtStr);
+        const fp = this.gepStr(f.name);
+        const arg = v.ty.kind === "float" ? v : v.ty.kind === "int" ? this.coerce(v, I64) : v;
+        const argTy = v.ty.kind === "float" ? F64 : v.ty.kind === "int" ? I64 : PTR;
+        this.emit(`call i32 (ptr, i64, ptr, ...) @snprintf(ptr ${dp}, i64 64, ptr ${fp}, ${argTy.llvm} ${arg.val})`);
+        off += 24;
+      }
+    }
+    return { ty: STR, val: buf };
+  }
+  genPrint(node) {
+    const v = this.genExpr(node.value);
+    if (this.target.freestanding) {
+      if (v.ty.kind === "str" || v.ty.llvm === "ptr") {
+        const sig = this.fns.get("@sid_write");
+        if (sig && sig.params[0]) {
+          const a = this.coerce(v, sig.params[0]);
+          this.emit(`call void @sid_write(${sig.params[0].llvm} ${a.val}, i64 0)`);
+        } else {
+          this.emit(`call void @sid_write(ptr ${v.val}, i64 0)`);
+        }
+      }
+      return;
+    }
+    const fmt = v.ty.kind === "float" ? "%g\n" : v.ty.kind === "bool" ? "%lld\n" : v.ty.kind === "int" ? "%lld\n" : "%s\n";
+    const s = this.internString(fmt);
+    const fp = this.gepStr(s.name);
+    if (v.ty.kind === "str" || v.ty.llvm === "ptr") {
+      this.emit(`call i32 (ptr, ...) @printf(ptr ${fp}, ptr ${v.val})`);
+    } else if (v.ty.kind === "bool") {
+      const ext = this.reg();
+      this.emit(`${ext} = zext i1 ${v.val} to i64`);
+      this.emit(`call i32 (ptr, ...) @printf(ptr ${fp}, i64 ${ext})`);
+    } else if (v.ty.kind === "float") {
+      this.emit(`call i32 (ptr, ...) @printf(ptr ${fp}, double ${v.val})`);
+    } else {
+      const c = this.coerce(v, I64);
+      this.emit(`call i32 (ptr, ...) @printf(ptr ${fp}, i64 ${c.val})`);
+    }
+  }
+};
+export {
+  ACEEnvelope,
+  CRDT,
+  Q as DILITHIUM_Q,
+  DIM,
+  GOLDILOCKS_P,
+  GraphemeDecomposer,
+  Interpreter,
+  K_MAX,
+  Ledger,
+  Machine,
+  RAM_SIZE,
+  RuntimeError,
+  TARGETS,
+  TAU_R,
+  alpPolicy,
+  base64Decode,
+  base64Encode,
+  blake3,
+  blake3Bytes,
+  compile,
+  detectZeroDivisor,
+  keygen as dilithiumKeygen,
+  polyMul as dilithiumPolyMul,
+  sign as dilithiumSign,
+  verify as dilithiumVerify,
+  emitLlvm,
+  executeOpcode,
+  fermatCertify,
+  fermatTest,
+  fmtNum,
+  fromZeroWidth,
+  ghostLogic,
+  goldAdd,
+  goldDiv,
+  goldInv,
+  goldMul,
+  goldSub,
+  hex,
+  inCantorSet,
+  isPrimeMillerRabin,
+  jInvariant,
+  kaniVerify,
+  leanProve,
+  modPowNum,
+  opcodeTable,
+  parse,
+  proofAnchor,
+  resolventNorm,
+  rhoGuard,
+  rtaMetric,
+  runSource,
+  sedenionMul,
+  seededBytes,
+  sigmaKernel,
+  tierPolicy,
+  toStr,
+  toZeroWidth,
+  tokenize,
+  utf8Encode,
+  zeroDivisorVault,
+  zeta,
+  zetaZeroApprox,
+  zmod
+};

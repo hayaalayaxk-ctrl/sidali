@@ -59,3 +59,11 @@ npm run sidac -- build hello.sidali --target=wasm32 --emit=obj
 - `CALL_METHOD` takes method name in `a`, arg count in `b`.
 - Loops emit `LOOP_ENTER(continuePc, breakPc)` / `LOOP_END` for `break`/`continue`.
 - `TRY_ENTER(handlerPc)` / `TRY_LEAVE` / `CATCH_BIND(name)` implement exceptions.
+
+## Universal substrates + DNA + dist (STEP 1)
+
+- `src/compiler/llvm.ts` — `TARGETS` carry `substrate`; `SUBSTRATES` lists 9 physics names. 6 electron + 7 non-electron targets, each lowering to a real clang arch.
+- `src/compiler/dna.ts` — DNA header `[START:SUBSTRATE=…]…[END]` + BLAKE3. Raw ELF keeps magic at byte 0, so the header is a trailer plus `<artifact>.dna` companion; `findDna` scans front then trailer. `buildFat` writes one `.sda` container.
+- `bin/sidac.mjs` — `--emit=fat`, `--substrate=`, `dna`, `substrates`; loads engine from `SIDALI_ENGINE`/`SIDALI_NATIVE` or `../dist`.
+- `dist-build.mjs` → `dist/` (standalone `sidac`, `sidac.wasm`, engine bundles, `install.sh`). `dist/` is committed so the raw install URL resolves.
+- Tests 54. Typecheck clean. Push blocked: token lacks CreateRepository/push for hayaalayaxk-ctrl.
