@@ -1485,13 +1485,19 @@ var LlvmGen = class {
     this.collectTypes();
     this.collectFns();
     const bodyLines = [];
+    const topLevel = [];
     for (const node of this.program.body) {
       if (node.kind === "FnDecl") bodyLines.push(this.genFunction(node));
       else if (node.kind === "ImplBlock") {
         for (const m of node.methods) bodyLines.push(this.genFunction(m, `${node.typeName}.${m.name}`));
       } else if (node.kind === "ConstDecl" || node.kind === "VarDecl" && node.type) {
         this.genGlobal(node);
+      } else if (node.kind !== "ImportStmt") {
+        topLevel.push(node);
       }
+    }
+    if (topLevel.length && !this.fns.has(`@${this.entry}`)) {
+      bodyLines.push(this.genScriptMain(topLevel));
     }
     if (this.target.freestanding && this.fns.has(`@${this.entry}`)) {
       bodyLines.push(`define void @_start() {
@@ -1527,6 +1533,23 @@ entry:
     header.push(...fnDecls);
     header.push("");
     return [...header, ...bodyLines].join("\n") + "\n";
+  }
+  // Codegen an implicit entry that runs file-scope statements, matching the
+  // VM's top-level execution for backends that need a callable symbol.
+  genScriptMain(stmts) {
+    const savedLines = this.lines;
+    const savedLocals = this.locals;
+    const savedRet = this.currentRet;
+    this.lines = [];
+    this.locals = /* @__PURE__ */ new Map();
+    this.currentRet = VOID;
+    for (const s of stmts) this.genStmt(s);
+    this.emit("ret i64 0");
+    const body = this.lines;
+    this.lines = savedLines;
+    this.locals = savedLocals;
+    this.currentRet = savedRet;
+    return [`define i64 @${this.entry}() {`, "entry:", ...body, "}", ""].join("\n");
   }
   collectTypes() {
     for (const node of this.program.body) {
