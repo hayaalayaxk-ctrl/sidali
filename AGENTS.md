@@ -91,3 +91,18 @@ npm run sidac -- build hello.sidali --target=wasm32 --emit=obj
   embedded UART string, so the same program drives different hardware.
 - Tests: 63 (added `test/hal.test.mjs`, real cross-compiles for photon/qubit/
   fluidic/vacuum/plasma/energy). Typecheck clean.
+
+## STEP 1/2 status (2026-10-02)
+
+Push to `origin` (github.com/hayaalayaxk-ctrl/sidali, branch main) is blocked:
+the token authenticates as hayaalayaxk-ctrl but every write returns
+403 Resource not accessible by integration (verified via the Contents API).
+Fix: use a token with contents:write (classic repo scope) or push from a
+machine with the user's own credentials. Once pushed, the raw install URL is
+https://raw.githubusercontent.com/hayaalayaxk-ctrl/sidali/main/dist/install.sh
+
+STEP 2 done: SAIR IR + Backend/Substrate traits + per-substrate HAL +
+substrate selector in the playground + CLI fixes. 68 tests pass, typecheck clean.
+
+Build/test commands: npm run build (index.html), node dist-build.mjs (dist/),
+npm test (68 tests), npm run typecheck, npm run dev (playground).
