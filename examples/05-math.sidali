@@ -1,0 +1,26 @@
+// SidAli — example 5: real math suite
+// Fibonacci, factorial, square, sum, primes, zeta, sedenion opcodes.
+
+print "fib 55 = " + fib(55)
+print "factorial 5 = " + factorial(5)
+
+function square(n) { return n * n }
+print "square 7 = " + square(7)
+
+let x = 5
+let y = 10
+let z = x + y
+print "sum = " + z
+
+print "isPrime 97 = " + isPrime(97)
+print "zeta 2 = " + zeta(2)
+
+let ops = opcodes()
+print "opcodes = " + len(ops)
+
+let a = [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+let b = [0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0]
+let zd = zeroDivisor(a, b)
+print "zero divisor norm product = " + zd.normProduct
+
+print "pi node = " + pi(2)

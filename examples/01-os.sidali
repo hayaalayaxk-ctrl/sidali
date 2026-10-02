@@ -1,0 +1,21 @@
+// SidAli — example 1: mini operating system
+// Reads and writes files through the RAM-backed machine.
+
+let m = newMachine()
+m.writeMBR("SECTORFORTH init")
+let boot = m.boot()
+print "boot: " + boot.message
+print "ring " + boot.ring
+
+fsWrite("/etc/motd", "welcome to SidAli OS")
+fsWrite("/home/user.txt", "hello from ring 0")
+
+let data = fsRead("/home/user.txt")
+print "read: " + data
+print "files: " + len(fsList())
+
+// Immutable Resurrection: export RAM as DNA and restore it
+m.load("sidali-immortal-kernel")
+let dna = m.exportDNA(64)
+print "dna ok " + contains(dna, "[START]")
+print "restore " + m.importDNA(dna)

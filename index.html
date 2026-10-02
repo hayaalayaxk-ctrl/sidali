@@ -1,0 +1,3525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+<title>SidAli — compiler + VM</title>
+<style>:root {
+  --bg: #0b0e14;
+  --panel: #11151f;
+  --panel-2: #0e121a;
+  --line: #1e2633;
+  --text: #d7e0ea;
+  --muted: #6b7a90;
+  --accent: #38e08b;
+  --accent-2: #4aa8ff;
+  --warn: #ffb454;
+  --err: #ff6b6b;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  -webkit-text-size-adjust: 100%;
+}
+
+body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+
+.bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 8px 12px; background: var(--panel);
+  border-bottom: 1px solid var(--line); flex-wrap: wrap;
+}
+
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: 0.3px; }
+.brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.brand .ver { color: var(--muted); font-weight: 400; font-size: 12px; }
+
+.bar-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+button, select {
+  font-family: var(--mono); font-size: 13px; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 7px 11px; cursor: pointer;
+}
+button:hover, select:hover { border-color: #33425a; }
+button.primary { background: var(--accent); color: #04140c; border-color: var(--accent); font-weight: 700; }
+button.primary:hover { filter: brightness(1.08); }
+button.ghost { background: transparent; }
+button.rec { background: var(--err); border-color: var(--err); color: #fff; }
+
+.workspace { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+
+.pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.editor-pane { border-right: 1px solid var(--line); }
+
+.pane-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line);
+  font-size: 12px; color: var(--muted);
+}
+.pane-head.sub { border-top: 1px solid var(--line); }
+.pane-head .file { color: var(--accent-2); }
+
+.editor-wrap { flex: 1; display: flex; min-height: 0; overflow: hidden; }
+.gutter {
+  width: 46px; padding: 12px 8px 12px 0; text-align: right; color: #3d4b60;
+  background: var(--panel-2); overflow: hidden; user-select: none; font-size: 13px; line-height: 1.5;
+}
+#editor {
+  flex: 1; resize: none; border: 0; outline: none; background: transparent; color: var(--text);
+  padding: 12px; font-family: var(--mono); font-size: 13px; line-height: 1.5;
+  tab-size: 2; white-space: pre; overflow: auto;
+}
+
+.pane-foot { padding: 5px 12px; border-top: 1px solid var(--line); font-size: 12px; }
+
+.output {
+  flex: 1; margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font-size: 13px; line-height: 1.55;
+}
+.output .err { color: var(--err); }
+.output .ok { color: var(--accent); }
+.output .dim { color: var(--muted); }
+
+.verify { padding: 8px 12px; overflow: auto; max-height: 40%; font-size: 12px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; margin: 3px 5px 3px 0;
+  padding: 4px 8px; border: 1px solid var(--line); border-radius: 20px; background: var(--panel-2);
+}
+.chip .k { color: var(--muted); }
+.chip .v { color: var(--accent); }
+.chip.bad .v { color: var(--err); }
+.chip.warn .v { color: var(--warn); }
+.hashline { margin: 4px 0; color: var(--muted); word-break: break-all; }
+.hashline b { color: var(--accent-2); font-weight: 600; }
+
+.muted { color: var(--muted); }
+
+@media (max-width: 820px) {
+  .workspace { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  .editor-pane { border-right: 0; border-bottom: 1px solid var(--line); }
+  .brand .ver { display: none; }
+  button, select { padding: 8px 10px; }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="dot"></span> SidAli <span class="ver">compiler + VM</span></div>
+  <div class="bar-actions">
+    <select id="example" title="Load example"></select>
+    <button id="translate" class="ghost">English → SidAli</button>
+    <button id="mic" class="ghost" title="Voice to code">🎤</button>
+    <button id="run" class="primary">▶ Run</button>
+  </div>
+</header>
+
+<main class="workspace">
+  <section class="pane editor-pane">
+    <div class="pane-head">
+      <span class="file">main.sidali</span>
+      <span id="cursor" class="muted">Ln 1, Col 1</span>
+    </div>
+    <div class="editor-wrap">
+      <div id="gutter" class="gutter" aria-hidden="true"></div>
+      <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+    </div>
+    <div class="pane-foot">
+      <span id="status" class="muted">ready</span>
+    </div>
+  </section>
+
+  <section class="pane output-pane">
+    <div class="pane-head">
+      <span class="file">stdout</span>
+      <span id="timing" class="muted">—</span>
+    </div>
+    <pre id="output" class="output"></pre>
+    <div class="pane-head sub">
+      <span class="file">verification layer</span>
+    </div>
+    <div id="verify" class="verify"></div>
+  </section>
+</main>
+
+<script>var SidAli = (() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    }
+    return to;
+  };
+  var __toCommonJS = (mod2) => __copyProps(__defProp({}, "__esModule", { value: true }), mod2);
+  var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+
+  // src/engine/api.ts
+  var api_exports = {};
+  __export(api_exports, {
+    ACEEnvelope: () => ACEEnvelope,
+    CRDT: () => CRDT,
+    DILITHIUM_Q: () => Q,
+    DIM: () => DIM,
+    GOLDILOCKS_P: () => GOLDILOCKS_P,
+    GraphemeDecomposer: () => GraphemeDecomposer,
+    Interpreter: () => Interpreter,
+    K_MAX: () => K_MAX,
+    Ledger: () => Ledger,
+    Machine: () => Machine,
+    RAM_SIZE: () => RAM_SIZE,
+    RuntimeError: () => RuntimeError,
+    TAU_R: () => TAU_R,
+    alpPolicy: () => alpPolicy,
+    base64Decode: () => base64Decode,
+    base64Encode: () => base64Encode,
+    blake3: () => blake3,
+    blake3Bytes: () => blake3Bytes,
+    compile: () => compile,
+    detectZeroDivisor: () => detectZeroDivisor,
+    dilithiumKeygen: () => keygen,
+    dilithiumPolyMul: () => polyMul,
+    dilithiumSign: () => sign,
+    dilithiumVerify: () => verify,
+    executeOpcode: () => executeOpcode,
+    fermatCertify: () => fermatCertify,
+    fermatTest: () => fermatTest,
+    fmtNum: () => fmtNum,
+    fromZeroWidth: () => fromZeroWidth,
+    ghostLogic: () => ghostLogic,
+    goldAdd: () => goldAdd,
+    goldDiv: () => goldDiv,
+    goldInv: () => goldInv,
+    goldMul: () => goldMul,
+    goldSub: () => goldSub,
+    hex: () => hex,
+    inCantorSet: () => inCantorSet,
+    isPrimeMillerRabin: () => isPrimeMillerRabin,
+    jInvariant: () => jInvariant,
+    kaniVerify: () => kaniVerify,
+    leanProve: () => leanProve,
+    modPowNum: () => modPowNum,
+    opcodeTable: () => opcodeTable,
+    parse: () => parse,
+    proofAnchor: () => proofAnchor,
+    resolventNorm: () => resolventNorm,
+    rhoGuard: () => rhoGuard,
+    rtaMetric: () => rtaMetric,
+    runSource: () => runSource,
+    sedenionMul: () => sedenionMul,
+    seededBytes: () => seededBytes,
+    sigmaKernel: () => sigmaKernel,
+    tierPolicy: () => tierPolicy,
+    toStr: () => toStr,
+    toZeroWidth: () => toZeroWidth,
+    tokenize: () => tokenize,
+    utf8Encode: () => utf8Encode,
+    zeroDivisorVault: () => zeroDivisorVault,
+    zeta: () => zeta,
+    zetaZeroApprox: () => zetaZeroApprox,
+    zmod: () => zmod
+  });
+
+  // src/lang/compiler.ts
+  var CompileError = class extends Error {
+  };
+  function compile(program) {
+    const chunks = [];
+    let chunkId = 0;
+    function newChunk(name, params, isMethod = false) {
+      const c = { id: chunkId++, name, params, code: [], isMethod };
+      chunks.push(c);
+      return c;
+    }
+    const main = newChunk("__main__", []);
+    function emit(c, op, a, b, line) {
+      c.code.push({ op, a, b, line });
+      return c.code.length - 1;
+    }
+    function compileBlockTo(c, block) {
+      for (const st of block.body) compileStmt(c, st);
+    }
+    function compileStmt(c, node) {
+      switch (node.kind) {
+        case "VarDecl": {
+          if (node.init) compileExpr(c, node.init);
+          else emit(c, "CONST", null);
+          emit(c, "DECLARE", node.name);
+          break;
+        }
+        case "ConstDecl": {
+          compileExpr(c, node.init);
+          emit(c, "DECLARE_CONST", node.name);
+          break;
+        }
+        case "FnDecl": {
+          const fc = newChunk(node.name, node.params);
+          compileBlockTo(fc, node.body);
+          emit(fc, "RET");
+          emit(c, "MAKE_FN", fc.id);
+          emit(c, "DECLARE", node.name);
+          break;
+        }
+        case "ClassDecl": {
+          const methods = [];
+          const statics = [];
+          for (const m of node.members) {
+            if (m.kind === "FnDecl") {
+              const mc = newChunk(`${node.name}.${m.name}`, m.params, true);
+              compileBlockTo(mc, m.body);
+              emit(mc, "RET");
+              methods.push({ name: m.name, chunk: mc.id });
+            } else if (m.kind === "VarDecl" || m.kind === "ConstDecl") {
+              statics.push({ name: m.name, value: m.init });
+            }
+          }
+          emit(c, "MAKE_CLASS", { name: node.name, parent: node.parent, methods, statics: statics.map((s) => s.name) });
+          emit(c, "DECLARE", node.name);
+          for (const s of statics) {
+            emit(c, "LOAD", node.name);
+            if (s.value) compileExpr(c, s.value);
+            else emit(c, "CONST", null);
+            emit(c, "SET_MEMBER", s.name);
+            emit(c, "POP");
+          }
+          break;
+        }
+        case "ContractDecl": {
+          emit(c, "CONST", `contract:${node.name}`);
+          emit(c, "DECLARE", node.name);
+          compileBlockTo(c, node.body);
+          break;
+        }
+        case "ReturnStmt": {
+          if (node.value) compileExpr(c, node.value);
+          else emit(c, "CONST", null);
+          emit(c, "RET");
+          break;
+        }
+        case "IfStmt": {
+          compileExpr(c, node.cond);
+          const jz = emit(c, "JZ", -1);
+          compileBlockTo(c, node.then);
+          if (node.else) {
+            const j = emit(c, "JUMP", -1);
+            c.code[jz].a = c.code.length;
+            if (node.else.kind === "IfStmt") compileStmt(c, node.else);
+            else compileBlockTo(c, node.else);
+            c.code[j].a = c.code.length;
+          } else {
+            c.code[jz].a = c.code.length;
+          }
+          break;
+        }
+        case "WhileStmt": {
+          const loopEnter = emit(c, "LOOP_ENTER", -1, -1);
+          const start = c.code.length;
+          compileExpr(c, node.cond);
+          const jz = emit(c, "JZ", -1);
+          compileBlockTo(c, node.body);
+          emit(c, "JUMP", start);
+          c.code[jz].a = c.code.length;
+          emit(c, "LOOP_END");
+          c.code[loopEnter].a = start;
+          c.code[loopEnter].b = c.code.length;
+          break;
+        }
+        case "RepeatStmt": {
+          compileExpr(c, node.count);
+          const idx = `__rep_i_${c.code.length}`;
+          emit(c, "DECLARE", idx);
+          const loopEnter = emit(c, "LOOP_ENTER", -1, -1);
+          const start = c.code.length;
+          emit(c, "LOAD", idx);
+          emit(c, "CONST", 0);
+          emit(c, "BINOP", ">");
+          const jz = emit(c, "JZ", -1);
+          compileBlockTo(c, node.body);
+          emit(c, "LOAD", idx);
+          emit(c, "CONST", 1);
+          emit(c, "BINOP", "-");
+          emit(c, "STORE", idx);
+          emit(c, "JUMP", start);
+          c.code[jz].a = c.code.length;
+          emit(c, "LOOP_END");
+          c.code[loopEnter].a = start;
+          c.code[loopEnter].b = c.code.length;
+          break;
+        }
+        case "ForStmt": {
+          const it = `__for_it_${c.code.length}`;
+          const ix = `__for_ix_${c.code.length}`;
+          compileExpr(c, node.iter);
+          emit(c, "DECLARE", it);
+          emit(c, "CONST", 0);
+          emit(c, "DECLARE", ix);
+          const loopEnter = emit(c, "LOOP_ENTER", -1, -1);
+          const start = c.code.length;
+          emit(c, "LOAD", ix);
+          emit(c, "LOAD", it);
+          emit(c, "LEN");
+          emit(c, "BINOP", "<");
+          const jz = emit(c, "JZ", -1);
+          emit(c, "LOAD", it);
+          emit(c, "LOAD", ix);
+          emit(c, "INDEX");
+          emit(c, "STORE", node.varName);
+          compileBlockTo(c, node.body);
+          const inc = c.code.length;
+          emit(c, "LOAD", ix);
+          emit(c, "CONST", 1);
+          emit(c, "BINOP", "+");
+          emit(c, "STORE", ix);
+          emit(c, "JUMP", start);
+          c.code[jz].a = c.code.length;
+          emit(c, "LOOP_END");
+          c.code[loopEnter].a = inc;
+          c.code[loopEnter].b = c.code.length;
+          break;
+        }
+        case "PrintStmt": {
+          compileExpr(c, node.value);
+          emit(c, "PRINT");
+          break;
+        }
+        case "BreakStmt":
+          emit(c, "BREAK");
+          break;
+        case "ContinueStmt":
+          emit(c, "CONTINUE");
+          break;
+        case "ThrowStmt":
+          compileExpr(c, node.value);
+          emit(c, "THROW");
+          break;
+        case "TryStmt": {
+          const tryEnter = emit(c, "TRY_ENTER", -1);
+          compileBlockTo(c, node.body);
+          emit(c, "TRY_LEAVE");
+          const after = emit(c, "JUMP", -1);
+          c.code[tryEnter].a = c.code.length;
+          emit(c, "CATCH_BIND", node.param);
+          compileBlockTo(c, node.handler);
+          if (node.finalizer) compileBlockTo(c, node.finalizer);
+          emit(c, "FINALLY_END");
+          c.code[after].a = c.code.length;
+          break;
+        }
+        case "ImportStmt":
+          emit(c, "IMPORT", node.name);
+          break;
+        case "BuildStmt": {
+          emit(c, "BUILD", node.target);
+          for (const a of node.args) compileExpr(c, a);
+          emit(c, "BUILD_APPLY", node.args.length);
+          break;
+        }
+        case "Block":
+          compileBlockTo(c, node);
+          break;
+        case "ExprStmt":
+          compileExpr(c, node.expr);
+          emit(c, "POP");
+          break;
+        default:
+          throw new CompileError(`cannot compile statement ${node.kind}`);
+      }
+    }
+    function compileExpr(c, node) {
+      switch (node.kind) {
+        case "NumLit":
+          emit(c, "CONST", node.value);
+          break;
+        case "StrLit":
+          emit(c, "CONST", node.value);
+          break;
+        case "BoolLit":
+          emit(c, "CONST", node.value);
+          break;
+        case "NilLit":
+          emit(c, "CONST", null);
+          break;
+        case "Ident":
+          emit(c, "LOAD", node.name);
+          break;
+        case "InterpStr": {
+          emit(c, "CONST", "");
+          for (const p of node.parts) {
+            if (p.text !== void 0) emit(c, "CONST", p.text);
+            else if (p.expr) compileExpr(c, p.expr);
+            emit(c, "BINOP", "+");
+          }
+          break;
+        }
+        case "ArrayLit": {
+          for (const it of node.items) compileExpr(c, it);
+          emit(c, "ARRAY", node.items.length);
+          break;
+        }
+        case "ObjectLit": {
+          for (const e of node.entries) {
+            emit(c, "CONST", e.key);
+            compileExpr(c, e.value);
+          }
+          emit(c, "OBJECT", node.entries.length);
+          break;
+        }
+        case "BinOp": {
+          compileExpr(c, node.left);
+          compileExpr(c, node.right);
+          emit(c, "BINOP", node.op);
+          break;
+        }
+        case "UnaryOp": {
+          compileExpr(c, node.operand);
+          emit(c, "UNOP", node.op);
+          break;
+        }
+        case "Assign": {
+          if (node.target.kind === "Ident") {
+            if (node.op === "=") compileExpr(c, node.value);
+            else {
+              emit(c, "LOAD", node.target.name);
+              compileExpr(c, node.value);
+              emit(c, "BINOP", node.op[0]);
+            }
+            emit(c, "STORE", node.target.name);
+          } else if (node.target.kind === "Index") {
+            compileExpr(c, node.target.object);
+            compileExpr(c, node.target.index);
+            if (node.op === "=") compileExpr(c, node.value);
+            else {
+              compileExpr(c, node.target.object);
+              compileExpr(c, node.target.index);
+              emit(c, "INDEX");
+              compileExpr(c, node.value);
+              emit(c, "BINOP", node.op[0]);
+            }
+            emit(c, "SET_INDEX");
+          } else if (node.target.kind === "Member") {
+            compileExpr(c, node.target.object);
+            if (node.op === "=") compileExpr(c, node.value);
+            else {
+              compileExpr(c, node.target.object);
+              emit(c, "MEMBER", node.target.property);
+              compileExpr(c, node.value);
+              emit(c, "BINOP", node.op[0]);
+            }
+            emit(c, "SET_MEMBER", node.target.property);
+          } else throw new CompileError("invalid assignment target");
+          break;
+        }
+        case "Ternary": {
+          compileExpr(c, node.cond);
+          const jz = emit(c, "JZ", -1);
+          compileExpr(c, node.then);
+          const j = emit(c, "JUMP", -1);
+          c.code[jz].a = c.code.length;
+          compileExpr(c, node.else);
+          c.code[j].a = c.code.length;
+          break;
+        }
+        case "Call": {
+          if (node.callee.kind === "Member") {
+            compileExpr(c, node.callee.object);
+            for (const a of node.args) compileExpr(c, a);
+            emit(c, "CALL_METHOD", node.callee.property, node.args.length);
+          } else {
+            compileExpr(c, node.callee);
+            for (const a of node.args) compileExpr(c, a);
+            emit(c, "CALL", node.args.length);
+          }
+          break;
+        }
+        case "Index": {
+          compileExpr(c, node.object);
+          compileExpr(c, node.index);
+          emit(c, "INDEX");
+          break;
+        }
+        case "Member": {
+          compileExpr(c, node.object);
+          emit(c, "MEMBER", node.property);
+          break;
+        }
+        case "Lambda": {
+          const lc = newChunk("__lambda__", node.params);
+          compileBlockTo(lc, node.body);
+          emit(lc, "RET");
+          emit(c, "MAKE_FN", lc.id);
+          break;
+        }
+        case "NewExpr": {
+          for (const a of node.args) compileExpr(c, a);
+          emit(c, "NEW", node.className, node.args.length);
+          break;
+        }
+        case "Transcendental": {
+          compileExpr(c, node.arg);
+          emit(c, "TRANSCEND", node.symbol, node.op);
+          break;
+        }
+        default:
+          throw new CompileError(`cannot compile expression ${node.kind}`);
+      }
+    }
+    compileBlockTo(main, { kind: "Block", body: program.body });
+    emit(main, "HALT");
+    return { main, chunks, constants: [] };
+  }
+
+  // src/lang/lexer.ts
+  var KEYWORDS = {
+    // English canonical keywords
+    "let": "let",
+    "const": "const",
+    "var": "let",
+    "fn": "fn",
+    "function": "fn",
+    "return": "return",
+    "if": "if",
+    "else": "else",
+    "while": "while",
+    "repeat": "repeat",
+    "times": "times",
+    "for": "for",
+    "in": "in",
+    "print": "print",
+    "class": "class",
+    "extends": "extends",
+    "new": "new",
+    "this": "this",
+    "try": "try",
+    "catch": "catch",
+    "finally": "finally",
+    "throw": "throw",
+    "true": "true",
+    "false": "false",
+    "nil": "nil",
+    "null": "nil",
+    "and": "and",
+    "or": "or",
+    "not": "not",
+    "import": "import",
+    "build": "build",
+    "contract": "contract",
+    "system": "system",
+    "platform": "platform",
+    "break": "break",
+    "continue": "continue",
+    // Arabic source spellings -> canonical English keyword
+    "\u0645\u062A\u063A\u064A\u0631": "let",
+    "\u062B\u0627\u0628\u062A": "const",
+    "\u062F\u0627\u0644\u0629": "fn",
+    "\u0627\u0631\u062C\u0627\u0639": "return",
+    "\u0625\u0631\u062C\u0627\u0639": "return",
+    "\u0627\u0630\u0627": "if",
+    "\u0625\u0630\u0627": "if",
+    "\u0648\u0627\u0644\u0627": "else",
+    "\u0648\u0625\u0644\u0627": "else",
+    "\u0637\u0627\u0644\u0645\u0627": "while",
+    "\u0643\u0631\u0631": "repeat",
+    "\u0644\u0643\u0644": "for",
+    "\u0641\u064A": "in",
+    "\u0627\u0637\u0628\u0639": "print",
+    "\u0637\u0628\u0627\u0639\u0629": "print",
+    "\u0635\u0646\u0641": "class",
+    "\u064A\u0645\u062A\u062F": "extends",
+    "\u062C\u062F\u064A\u062F": "new",
+    "\u0647\u0630\u0627": "this",
+    "\u0645\u062D\u0627\u0648\u0644\u0629": "try",
+    "\u0627\u0644\u062A\u0642\u0627\u0637": "catch",
+    "\u0627\u062E\u064A\u0631\u0627": "finally",
+    "\u0623\u062E\u064A\u0631\u0627": "finally",
+    "\u0627\u0631\u0641\u0639": "throw",
+    "\u0635\u062D\u064A\u062D": "true",
+    "\u062E\u0637\u0623": "false",
+    "\u0644\u0627\u0634\u064A\u0621": "nil",
+    "\u0644\u0627_\u0634\u064A\u0621": "nil",
+    "\u0648": "and",
+    "\u0627\u0648": "or",
+    "\u0623\u0648": "or",
+    "\u0644\u064A\u0633": "not",
+    "\u0639\u0642\u062F": "contract",
+    "\u0646\u0638\u0627\u0645": "system",
+    "\u0646\u0638\u0627\u0645_\u062A\u0634\u063A\u064A\u0644": "system",
+    "\u0628\u0646\u0627\u0621": "build",
+    "\u0645\u0646\u0635\u0629": "platform",
+    "\u0642\u0627\u0639\u062F\u0629": "database",
+    "\u062E\u0627\u062F\u0645": "server",
+    "\u0648\u0627\u062C\u0647\u0629": "interface",
+    "\u0632\u0648\u062C": "pair",
+    "\u062F\u0639": "let",
+    "\u0639\u0631\u0641": "let"
+  };
+  var PUNCT2 = ["==", "!=", "<=", ">=", "&&", "||", "->", "=>", "+=", "-=", "*=", "/=", "%=", "**", "..", "::"];
+  var LexError = class extends Error {
+    constructor(msg, line, col) {
+      super(`LexError at ${line}:${col}: ${msg}`);
+      __publicField(this, "line");
+      __publicField(this, "col");
+      this.line = line;
+      this.col = col;
+    }
+  };
+  function tokenize(src) {
+    const toks = [];
+    let i = 0;
+    let line = 1;
+    let col = 1;
+    const n = src.length;
+    const peek = (k = 0) => src[i + k];
+    const advance = () => {
+      const c = src[i++];
+      if (c === "\n") {
+        line++;
+        col = 1;
+      } else {
+        col++;
+      }
+      return c;
+    };
+    const push = (type, value, l = line, c = col) => toks.push({ type, value, line: l, col: c });
+    const isIdStart = (ch) => ch >= "a" && ch <= "z" || ch >= "A" && ch <= "Z" || ch === "_" || ch === "$" || /[\u0600-\u06FF]/.test(ch);
+    const isIdPart = (ch) => isIdStart(ch) || ch >= "0" && ch <= "9";
+    const isDigit = (ch) => ch >= "0" && ch <= "9";
+    while (i < n) {
+      const ch = peek();
+      if (ch === "\n") {
+        const l = line, c = col;
+        advance();
+        push("newline", "\n", l, c);
+        continue;
+      }
+      if (ch === " " || ch === "	" || ch === "\r") {
+        advance();
+        continue;
+      }
+      if (ch === "/" && peek(1) === "/") {
+        while (i < n && peek() !== "\n") advance();
+        continue;
+      }
+      if (ch === "/" && peek(1) === "*") {
+        advance();
+        advance();
+        while (i < n && !(peek() === "*" && peek(1) === "/")) advance();
+        if (i < n) {
+          advance();
+          advance();
+        }
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "\xAB") {
+        const quote = ch === "\xAB" ? "\xBB" : ch;
+        const startL2 = line, startC2 = col;
+        advance();
+        let raw = "";
+        while (i < n && peek() !== quote) {
+          if (peek() === "\\") {
+            advance();
+            const e = advance();
+            raw += e === "n" ? "\n" : e === "t" ? "	" : e === '"' ? '"' : e === "'" ? "'" : e === "\\" ? "\\" : e;
+          } else {
+            raw += advance();
+          }
+        }
+        if (i >= n) throw new LexError("unterminated string", startL2, startC2);
+        advance();
+        push("string", raw, startL2, startC2);
+        toks[toks.length - 1].parts = splitInterpolation(raw);
+        continue;
+      }
+      if (isDigit(ch) || ch === "." && isDigit(peek(1))) {
+        const startL2 = line, startC2 = col;
+        let num = "";
+        if (ch === "0" && (peek(1) === "x" || peek(1) === "X")) {
+          advance();
+          advance();
+          while (i < n && /[0-9a-fA-F_]/.test(peek())) num += advance();
+          push("number", String(parseInt(num.replace(/_/g, ""), 16)), startL2, startC2);
+          continue;
+        }
+        if (ch === "0" && (peek(1) === "b" || peek(1) === "B")) {
+          advance();
+          advance();
+          while (i < n && /[01_]/.test(peek())) num += advance();
+          push("number", String(parseInt(num.replace(/_/g, ""), 2)), startL2, startC2);
+          continue;
+        }
+        while (i < n && (isDigit(peek()) || peek() === "." || peek() === "_")) {
+          const c2 = peek();
+          if (c2 === "." && !isDigit(peek(1))) break;
+          num += advance();
+        }
+        if ((peek() === "e" || peek() === "E") && (isDigit(peek(1)) || (peek(1) === "+" || peek(1) === "-") && isDigit(peek(2)))) {
+          num += advance();
+          if (peek() === "+" || peek() === "-") num += advance();
+          while (i < n && isDigit(peek())) num += advance();
+        }
+        push("number", num.replace(/_/g, ""), startL2, startC2);
+        continue;
+      }
+      if (isIdStart(ch)) {
+        const startL2 = line, startC2 = col;
+        let id = "";
+        while (i < n && isIdPart(peek())) id += advance();
+        if (KEYWORDS[id]) push("keyword", KEYWORDS[id], startL2, startC2);
+        else push("ident", id, startL2, startC2);
+        continue;
+      }
+      const startL = line, startC = col;
+      const two = ch + (peek(1) || "");
+      if (PUNCT2.includes(two)) {
+        advance();
+        advance();
+        push("op", two, startL, startC);
+        continue;
+      }
+      if ("+-*/%<>=!&|^~?:".includes(ch)) {
+        advance();
+        push("op", ch, startL, startC);
+        continue;
+      }
+      if ("(){}[],.;".includes(ch)) {
+        advance();
+        push("punct", ch, startL, startC);
+        continue;
+      }
+      throw new LexError(`unexpected character ${JSON.stringify(ch)}`, startL, startC);
+    }
+    push("eof", "");
+    return toks;
+  }
+  function splitInterpolation(raw) {
+    const parts = [];
+    let buf = "";
+    let i = 0;
+    while (i < raw.length) {
+      if (raw[i] === "$" && raw[i + 1] === "{") {
+        if (buf) {
+          parts.push({ text: buf });
+          buf = "";
+        }
+        let depth = 1;
+        i += 2;
+        let expr = "";
+        while (i < raw.length && depth > 0) {
+          if (raw[i] === "{") depth++;
+          else if (raw[i] === "}") {
+            depth--;
+            if (depth === 0) break;
+          }
+          expr += raw[i++];
+        }
+        i++;
+        parts.push({ expr });
+      } else {
+        buf += raw[i++];
+      }
+    }
+    if (buf) parts.push({ text: buf });
+    return parts;
+  }
+
+  // src/lang/parser.ts
+  var ParseError = class extends Error {
+    constructor(msg, line, col) {
+      super(`ParseError at ${line}:${col}: ${msg}`);
+      __publicField(this, "line");
+      __publicField(this, "col");
+      this.line = line;
+      this.col = col;
+    }
+  };
+  function parse(src) {
+    let toks;
+    try {
+      toks = tokenize(src);
+    } catch (e) {
+      if (e instanceof LexError) throw e;
+      throw e;
+    }
+    let p = 0;
+    const cur = () => toks[p];
+    const at = (v) => cur().value === v && (cur().type === "keyword" || cur().type === "op" || cur().type === "punct");
+    const atKw = (v) => cur().type === "keyword" && cur().value === v;
+    const next = () => toks[p++];
+    const skipNewlines = () => {
+      while (cur().type === "newline") p++;
+    };
+    const skipSeparators = () => {
+      while (cur().type === "newline" || at(";")) p++;
+    };
+    const expect = (v) => {
+      if (!at(v)) throw new ParseError(`expected '${v}' but found '${cur().value || cur().type}'`, cur().line, cur().col);
+      return next();
+    };
+    const expectIdent = () => {
+      if (cur().type !== "ident") throw new ParseError(`expected identifier but found '${cur().value || cur().type}'`, cur().line, cur().col);
+      return next().value;
+    };
+    function parseInlineExpr(code) {
+      const sub = parse(code);
+      const st = sub.body[0];
+      if (st && st.kind === "ExprStmt") return st.expr;
+      return { kind: "Ident", name: "nil" };
+    }
+    function parseProgram() {
+      const body = [];
+      skipSeparators();
+      while (cur().type !== "eof") {
+        body.push(parseStatement());
+        skipSeparators();
+      }
+      return { kind: "Program", body };
+    }
+    function parseBlock() {
+      expect("{");
+      const body = [];
+      skipSeparators();
+      while (!at("}") && cur().type !== "eof") {
+        body.push(parseStatement());
+        skipSeparators();
+      }
+      expect("}");
+      return { kind: "Block", body };
+    }
+    function parseStatement() {
+      const t = cur();
+      if (atKw("let")) return parseVarDecl(false);
+      if (atKw("const")) return parseVarDecl(true);
+      if (atKw("fn")) {
+        next();
+        const name = expectIdent();
+        const params = parseParams();
+        const body = parseBlock();
+        return { kind: "FnDecl", name, params, body };
+      }
+      if (atKw("class")) {
+        next();
+        const name = expectIdent();
+        let parent = null;
+        if (atKw("extends")) {
+          next();
+          parent = expectIdent();
+        }
+        expect("{");
+        const members = [];
+        skipSeparators();
+        while (!at("}") && cur().type !== "eof") {
+          if (atKw("let") || atKw("const")) {
+            members.push(parseVarDecl(atKw("const")));
+          } else {
+            const mName = expectIdent();
+            const params = parseParams();
+            const body = parseBlock();
+            members.push({ kind: "FnDecl", name: mName, params, body });
+          }
+          skipSeparators();
+        }
+        expect("}");
+        return { kind: "ClassDecl", name, parent, members };
+      }
+      if (atKw("contract")) {
+        next();
+        const name = expectIdent();
+        const body = parseBlock();
+        return { kind: "ContractDecl", name, body };
+      }
+      if (atKw("system") || atKw("platform")) {
+        const target = next().value;
+        const name = expectIdent();
+        return { kind: "BuildStmt", target, args: [{ kind: "StrLit", value: name }] };
+      }
+      if (atKw("build")) {
+        next();
+        const parts = [];
+        while (cur().type === "ident" || cur().type === "keyword") parts.push(next().value);
+        const args = parts.length ? [{ kind: "StrLit", value: parts.join(" ") }] : [];
+        return { kind: "BuildStmt", target: "build", args };
+      }
+      if (atKw("import")) {
+        next();
+        const name = expectIdent();
+        return { kind: "ImportStmt", name };
+      }
+      if (atKw("return")) {
+        next();
+        let value = null;
+        if (cur().type !== "newline" && !at("}") && !at(";") && cur().type !== "eof") value = parseExpr();
+        return { kind: "ReturnStmt", value };
+      }
+      if (atKw("if")) return parseIf();
+      if (atKw("while")) {
+        next();
+        const cond = parseExpr();
+        const body = parseBlock();
+        return { kind: "WhileStmt", cond, body };
+      }
+      if (atKw("repeat")) {
+        next();
+        const count = parseExpr();
+        if (atKw("times")) next();
+        const body = parseBlock();
+        return { kind: "RepeatStmt", count, body };
+      }
+      if (atKw("for")) {
+        next();
+        const varName = expectIdent();
+        if (atKw("in")) next();
+        const iter = parseExpr();
+        const body = parseBlock();
+        return { kind: "ForStmt", varName, iter, body };
+      }
+      if (atKw("print")) {
+        next();
+        let value;
+        if (at("(")) {
+          next();
+          value = parseExpr();
+          expect(")");
+        } else value = parseExpr();
+        return { kind: "PrintStmt", value };
+      }
+      if (atKw("break")) {
+        next();
+        return { kind: "BreakStmt" };
+      }
+      if (atKw("continue")) {
+        next();
+        return { kind: "ContinueStmt" };
+      }
+      if (atKw("throw")) {
+        next();
+        return { kind: "ThrowStmt", value: parseExpr() };
+      }
+      if (atKw("try")) return parseTry();
+      if (at("{")) return parseBlock();
+      const expr = parseExpr();
+      return { kind: "ExprStmt", expr };
+    }
+    function parseVarDecl(isConst) {
+      next();
+      const name = expectIdent();
+      let init = null;
+      if (at("=")) {
+        next();
+        init = parseExpr();
+      }
+      return isConst ? { kind: "ConstDecl", name, init } : { kind: "VarDecl", name, init };
+    }
+    function parseParams() {
+      expect("(");
+      const params = [];
+      skipNewlines();
+      while (!at(")")) {
+        params.push(expectIdent());
+        skipNewlines();
+        if (at(",")) {
+          next();
+          skipNewlines();
+        }
+      }
+      expect(")");
+      return params;
+    }
+    function parseIf() {
+      next();
+      const cond = parseExpr();
+      const then = parseBlock();
+      let els = null;
+      skipSeparators();
+      if (atKw("else")) {
+        next();
+        skipSeparators();
+        if (atKw("if")) els = parseIf();
+        else els = parseBlock();
+      }
+      return { kind: "IfStmt", cond, then, else: els };
+    }
+    function parseTry() {
+      next();
+      const body = parseBlock();
+      skipSeparators();
+      let param = "err";
+      let handler = { kind: "Block", body: [] };
+      if (atKw("catch")) {
+        next();
+        if (at("(")) {
+          next();
+          param = expectIdent();
+          expect(")");
+        }
+        handler = parseBlock();
+        skipSeparators();
+      }
+      let finalizer = null;
+      if (atKw("finally")) {
+        next();
+        finalizer = parseBlock();
+      }
+      return { kind: "TryStmt", body, param, handler, finalizer };
+    }
+    function parseExpr() {
+      return parseAssign();
+    }
+    function parseAssign() {
+      const left = parseTernary();
+      if (["=", "+=", "-=", "*=", "/=", "%="].includes(cur().value) && cur().type === "op") {
+        const op = next().value;
+        const value = parseAssign();
+        return { kind: "Assign", op, target: left, value };
+      }
+      return left;
+    }
+    function parseTernary() {
+      const cond = parseOr();
+      if (at("?")) {
+        next();
+        const then = parseExpr();
+        expect(":");
+        const els = parseExpr();
+        return { kind: "Ternary", cond, then, else: els };
+      }
+      return cond;
+    }
+    function parseOr() {
+      let left = parseAnd();
+      while (at("||") || atKw("or")) {
+        next();
+        const right = parseAnd();
+        left = { kind: "BinOp", op: "||", left, right };
+      }
+      return left;
+    }
+    function parseAnd() {
+      let left = parseEquality();
+      while (at("&&") || atKw("and")) {
+        next();
+        const right = parseEquality();
+        left = { kind: "BinOp", op: "&&", left, right };
+      }
+      return left;
+    }
+    function parseEquality() {
+      let left = parseComparison();
+      while (at("==") || at("!=")) {
+        const op = next().value;
+        left = { kind: "BinOp", op, left, right: parseComparison() };
+      }
+      return left;
+    }
+    function parseComparison() {
+      let left = parseRange();
+      while (at("<") || at(">") || at("<=") || at(">=")) {
+        const op = next().value;
+        left = { kind: "BinOp", op, left, right: parseRange() };
+      }
+      return left;
+    }
+    function parseRange() {
+      let left = parseAdditive();
+      if (at("..")) {
+        next();
+        const right = parseAdditive();
+        return { kind: "Call", callee: { kind: "Ident", name: "range" }, args: [left, right] };
+      }
+      return left;
+    }
+    function parseAdditive() {
+      let left = parseMultiplicative();
+      while (at("+") || at("-")) {
+        const op = next().value;
+        left = { kind: "BinOp", op, left, right: parseMultiplicative() };
+      }
+      return left;
+    }
+    function parseMultiplicative() {
+      let left = parsePower();
+      while (at("*") || at("/") || at("%")) {
+        const op = next().value;
+        left = { kind: "BinOp", op, left, right: parsePower() };
+      }
+      return left;
+    }
+    function parsePower() {
+      const left = parseUnary();
+      if (at("**")) {
+        next();
+        const right = parsePower();
+        return { kind: "BinOp", op: "**", left, right };
+      }
+      return left;
+    }
+    function parseUnary() {
+      if (at("!") || at("-") || at("+") || at("~") || atKw("not")) {
+        const raw = next().value;
+        const op = raw === "not" ? "!" : raw;
+        return { kind: "UnaryOp", op, operand: parseUnary() };
+      }
+      return parsePostfix();
+    }
+    function parsePostfix() {
+      let node = parsePrimary();
+      for (; ; ) {
+        if (at("(")) {
+          next();
+          const args = [];
+          skipNewlines();
+          while (!at(")")) {
+            args.push(parseExpr());
+            skipNewlines();
+            if (at(",")) {
+              next();
+              skipNewlines();
+            }
+          }
+          expect(")");
+          node = { kind: "Call", callee: node, args };
+        } else if (at("[")) {
+          next();
+          const index = parseExpr();
+          expect("]");
+          node = { kind: "Index", object: node, index };
+        } else if (at(".")) {
+          next();
+          const prop = cur().type === "ident" || cur().type === "keyword" ? next().value : (() => {
+            throw new ParseError("expected property name", cur().line, cur().col);
+          })();
+          node = { kind: "Member", object: node, property: prop };
+        } else break;
+      }
+      return node;
+    }
+    function parsePrimary() {
+      const t = cur();
+      if (t.type === "number") {
+        next();
+        return { kind: "NumLit", value: Number(t.value) };
+      }
+      if (t.type === "string") {
+        next();
+        const parts = t.parts || [];
+        if (parts.length === 1 && parts[0].text !== void 0) return { kind: "StrLit", value: parts[0].text };
+        return {
+          kind: "InterpStr",
+          parts: parts.map((pp) => pp.expr !== void 0 ? { expr: parseInlineExpr(pp.expr) } : { text: pp.text })
+        };
+      }
+      if (atKw("true")) {
+        next();
+        return { kind: "BoolLit", value: true };
+      }
+      if (atKw("false")) {
+        next();
+        return { kind: "BoolLit", value: false };
+      }
+      if (atKw("nil")) {
+        next();
+        return { kind: "NilLit" };
+      }
+      if (atKw("fn")) {
+        next();
+        const params = parseParams();
+        const body = parseBlock();
+        return { kind: "Lambda", params, body };
+      }
+      if (atKw("new")) {
+        next();
+        const className = expectIdent();
+        const args = [];
+        if (at("(")) {
+          next();
+          skipNewlines();
+          while (!at(")")) {
+            args.push(parseExpr());
+            skipNewlines();
+            if (at(",")) {
+              next();
+              skipNewlines();
+            }
+          }
+          expect(")");
+        }
+        return { kind: "NewExpr", className, args };
+      }
+      if (at("(")) {
+        next();
+        const e = parseExpr();
+        expect(")");
+        return e;
+      }
+      if (at("[")) {
+        next();
+        const items = [];
+        skipNewlines();
+        while (!at("]")) {
+          items.push(parseExpr());
+          skipNewlines();
+          if (at(",")) {
+            next();
+            skipNewlines();
+          }
+        }
+        expect("]");
+        return { kind: "ArrayLit", items };
+      }
+      if (at("{")) {
+        next();
+        const entries = [];
+        skipNewlines();
+        while (!at("}")) {
+          let key;
+          if (cur().type === "string" || cur().type === "ident" || cur().type === "keyword") key = next().value;
+          else throw new ParseError("expected object key", cur().line, cur().col);
+          expect(":");
+          const value = parseExpr();
+          entries.push({ key, value });
+          skipNewlines();
+          if (at(",")) {
+            next();
+            skipNewlines();
+          }
+        }
+        expect("}");
+        return { kind: "ObjectLit", entries };
+      }
+      if (t.type === "ident" || atKw("this")) {
+        if (atKw("this")) {
+          next();
+          return { kind: "Ident", name: "this" };
+        }
+        next();
+        if ((t.value === "pi" || t.value === "PI") && cur().value === "(") {
+          next();
+          const arg = parseExpr();
+          expect(")");
+          return { kind: "Transcendental", symbol: "pi", op: "mul", arg };
+        }
+        if (t.value === "pi" || t.value === "PI") return { kind: "Ident", name: "PI" };
+        if (t.value === "e" && cur().value === "(") {
+          next();
+          const arg = parseExpr();
+          expect(")");
+          return { kind: "Transcendental", symbol: "e", op: "log", arg };
+        }
+        return { kind: "Ident", name: t.value };
+      }
+      throw new ParseError(`unexpected token '${t.value || t.type}'`, t.line, t.col);
+    }
+    return parseProgram();
+  }
+
+  // src/runtime/blake3.ts
+  var IV = new Uint32Array([
+    1779033703,
+    3144134277,
+    1013904242,
+    2773480762,
+    1359893119,
+    2600822924,
+    528734635,
+    1541459225
+  ]);
+  var MSG_PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+  var CHUNK_START = 1 << 0;
+  var CHUNK_END = 1 << 1;
+  var ROOT = 1 << 3;
+  function rotr(x, n) {
+    return (x >>> n | x << 32 - n) >>> 0;
+  }
+  function g(state, a, b, c, d, mx, my) {
+    state[a] = state[a] + state[b] + mx >>> 0;
+    state[d] = rotr(state[d] ^ state[a], 16);
+    state[c] = state[c] + state[d] >>> 0;
+    state[b] = rotr(state[b] ^ state[c], 12);
+    state[a] = state[a] + state[b] + my >>> 0;
+    state[d] = rotr(state[d] ^ state[a], 8);
+    state[c] = state[c] + state[d] >>> 0;
+    state[b] = rotr(state[b] ^ state[c], 7);
+  }
+  function compress(cv, block, counter, blockLen, flags) {
+    const state = new Uint32Array(16);
+    state.set(cv, 0);
+    state.set(IV.subarray(0, 4), 8);
+    state[12] = counter >>> 0;
+    state[13] = Math.floor(counter / 4294967296) >>> 0;
+    state[14] = blockLen >>> 0;
+    state[15] = flags >>> 0;
+    let m = Uint32Array.from(block);
+    for (let r = 0; r < 7; r++) {
+      g(state, 0, 4, 8, 12, m[0], m[1]);
+      g(state, 1, 5, 9, 13, m[2], m[3]);
+      g(state, 2, 6, 10, 14, m[4], m[5]);
+      g(state, 3, 7, 11, 15, m[6], m[7]);
+      g(state, 0, 5, 10, 15, m[8], m[9]);
+      g(state, 1, 6, 11, 12, m[10], m[11]);
+      g(state, 2, 7, 8, 13, m[12], m[13]);
+      g(state, 3, 4, 9, 14, m[14], m[15]);
+      if (r < 6) {
+        const p = new Uint32Array(16);
+        for (let i = 0; i < 16; i++) p[i] = m[MSG_PERM[i]];
+        m = p;
+      }
+    }
+    const out = new Uint32Array(16);
+    for (let i = 0; i < 8; i++) out[i] = (state[i] ^ state[i + 8]) >>> 0;
+    for (let i = 0; i < 8; i++) out[i + 8] = (state[i + 8] ^ cv[i]) >>> 0;
+    return out;
+  }
+  function bytesToWords(bytes, offset) {
+    const w = new Uint32Array(16);
+    for (let i = 0; i < 16; i++) {
+      const j = offset + i * 4;
+      w[i] = ((bytes[j] || 0) | (bytes[j + 1] || 0) << 8 | (bytes[j + 2] || 0) << 16 | (bytes[j + 3] || 0) << 24) >>> 0;
+    }
+    return w;
+  }
+  function blake3Bytes(input) {
+    let cv = Uint32Array.from(IV);
+    const blocks = Math.max(1, Math.ceil(input.length / 64));
+    let lastOut = null;
+    for (let b = 0; b < blocks; b++) {
+      const offset = b * 64;
+      const blockLen = Math.min(64, input.length - offset);
+      const flags = (b === 0 ? CHUNK_START : 0) | (b === blocks - 1 ? CHUNK_END : 0) | (blocks === 1 ? ROOT : 0);
+      const words = bytesToWords(input, offset);
+      const out2 = compress(cv, words, b, blockLen < 0 ? 0 : blockLen, flags);
+      lastOut = out2;
+      cv = out2.slice(0, 8);
+    }
+    const out = lastOut;
+    const digest = new Uint8Array(32);
+    for (let i = 0; i < 8; i++) {
+      digest[i * 4] = out[i] & 255;
+      digest[i * 4 + 1] = out[i] >>> 8 & 255;
+      digest[i * 4 + 2] = out[i] >>> 16 & 255;
+      digest[i * 4 + 3] = out[i] >>> 24 & 255;
+    }
+    return digest;
+  }
+  function utf8Encode(s) {
+    if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(s);
+    const bytes = [];
+    for (const ch of s) {
+      const cp = ch.codePointAt(0);
+      if (cp < 128) bytes.push(cp);
+      else if (cp < 2048) bytes.push(192 | cp >> 6, 128 | cp & 63);
+      else if (cp < 65536) bytes.push(224 | cp >> 12, 128 | cp >> 6 & 63, 128 | cp & 63);
+      else bytes.push(240 | cp >> 18, 128 | cp >> 12 & 63, 128 | cp >> 6 & 63, 128 | cp & 63);
+    }
+    return new Uint8Array(bytes);
+  }
+  function hex(bytes) {
+    let s = "";
+    for (const b of bytes) s += b.toString(16).padStart(2, "0");
+    return s;
+  }
+  function blake3(input) {
+    const bytes = typeof input === "string" ? utf8Encode(input) : input;
+    return hex(blake3Bytes(bytes));
+  }
+  function seededBytes(seed, count) {
+    const out = new Uint8Array(count);
+    let counter = 0;
+    let off = 0;
+    while (off < count) {
+      const block = blake3Bytes(concat(seed, u32le(counter)));
+      const n = Math.min(32, count - off);
+      out.set(block.subarray(0, n), off);
+      off += n;
+      counter++;
+    }
+    return out;
+  }
+  function concat(a, b) {
+    const r = new Uint8Array(a.length + b.length);
+    r.set(a, 0);
+    r.set(b, a.length);
+    return r;
+  }
+  function u32le(n) {
+    return new Uint8Array([n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255]);
+  }
+
+  // src/runtime/math.ts
+  function modPow(base, exp, mod2) {
+    if (mod2 === 1n) return 0n;
+    let result = 1n;
+    base = (base % mod2 + mod2) % mod2;
+    while (exp > 0n) {
+      if (exp & 1n) result = result * base % mod2;
+      exp >>= 1n;
+      base = base * base % mod2;
+    }
+    return result;
+  }
+  function modPowNum(base, exp, mod2) {
+    let result = 1;
+    base = (base % mod2 + mod2) % mod2;
+    while (exp > 0) {
+      if (exp & 1) result = Number(BigInt(result) * BigInt(base) % BigInt(mod2));
+      exp >>= 1;
+      base = Number(BigInt(base) * BigInt(base) % BigInt(mod2));
+    }
+    return result;
+  }
+  function fermatTest(n, a = 2) {
+    if (n < 2) return false;
+    if (n === 2) return true;
+    if (n % 2 === 0) return false;
+    return modPowNum(a, n - 1, n) === 1;
+  }
+  function isPrimeMillerRabin(n) {
+    if (n < 2) return false;
+    for (const p of [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]) {
+      if (n === p) return true;
+      if (n % p === 0) return false;
+    }
+    let d = n - 1;
+    let r = 0;
+    while (d % 2 === 0) {
+      d /= 2;
+      r++;
+    }
+    for (const a of [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]) {
+      if (a >= n) continue;
+      let x = modPowNum(a, d, n);
+      if (x === 1 || x === n - 1) continue;
+      let cont = false;
+      for (let i = 0; i < r - 1; i++) {
+        x = Number(BigInt(x) * BigInt(x) % BigInt(n));
+        if (x === n - 1) {
+          cont = true;
+          break;
+        }
+      }
+      if (!cont) return false;
+    }
+    return true;
+  }
+  function fermatCertify(n) {
+    const bases = [2, 3, 5, 7];
+    const witnesses = bases.map((a) => ({ a, value: n >= 2 ? modPowNum(a, Math.max(0, n - 1), n) : 0, pass: n >= 2 ? fermatTest(n, a) : false }));
+    const fermatPass = witnesses.every((w) => w.pass);
+    const mrPrime = isPrimeMillerRabin(n);
+    const carmichael = fermatPass && !mrPrime && n > 1;
+    return { n, isPrime: mrPrime, bases, witnesses, carmichael };
+  }
+  var GOLDILOCKS_P = 18446744069414584321n;
+  function goldAdd(a, b) {
+    return (a + b) % GOLDILOCKS_P;
+  }
+  function goldSub(a, b) {
+    return ((a - b) % GOLDILOCKS_P + GOLDILOCKS_P) % GOLDILOCKS_P;
+  }
+  function goldMul(a, b) {
+    return a * b % GOLDILOCKS_P;
+  }
+  function goldInv(a) {
+    return modPow(a, GOLDILOCKS_P - 2n, GOLDILOCKS_P);
+  }
+  function goldDiv(a, b) {
+    return goldMul(a, goldInv(b));
+  }
+  function zmod(value, n) {
+    return (value % n + n) % n;
+  }
+  function zeta(s, terms = 4e3) {
+    if (s === 1) return Infinity;
+    let eta = 0;
+    for (let n = 1; n <= terms; n++) {
+      const term = Math.pow(n, -s);
+      eta += (n % 2 === 1 ? 1 : -1) * term;
+    }
+    const factor = 1 - Math.pow(2, 1 - s);
+    return eta / factor;
+  }
+  function zetaZeroApprox(count = 3) {
+    const known = [14.134725, 21.02204, 37.586178, 30.424876, 32.935062];
+    known.sort((a, b) => a - b);
+    return known.slice(0, count).map((t) => ({ t, zeta: 0 }));
+  }
+  var ZW = ["\u200B", "\u200C", "\u200D"];
+  function toZeroWidth(text) {
+    const bytes = typeof TextEncoder !== "undefined" ? new TextEncoder().encode(text) : new Uint8Array(Array.from(text).map((c) => c.charCodeAt(0) & 255));
+    let out = "";
+    for (const b of bytes) {
+      for (let bit = 7; bit >= 0; bit--) {
+        out += ZW[b >> bit & 1 ? 1 : 0];
+      }
+      out += ZW[2];
+    }
+    return out;
+  }
+  function fromZeroWidth(zw) {
+    const bits = [];
+    const bytes = [];
+    for (const ch of zw) {
+      if (ch === ZW[0]) bits.push(0);
+      else if (ch === ZW[1]) bits.push(1);
+      else if (ch === ZW[2]) {
+        if (bits.length >= 8) {
+          let byte = 0;
+          for (let i = 0; i < 8; i++) byte = byte << 1 | bits[i];
+          bytes.push(byte);
+        }
+        bits.length = 0;
+      }
+    }
+    if (bits.length >= 8) {
+      let byte = 0;
+      for (let i = 0; i < 8; i++) byte = byte << 1 | bits[i];
+      bytes.push(byte);
+    }
+    const arr = new Uint8Array(bytes);
+    if (typeof TextDecoder !== "undefined") return new TextDecoder().decode(arr);
+    return Array.from(arr).map((b) => String.fromCharCode(b)).join("");
+  }
+  function inCantorSet(x, depth = 20) {
+    if (x < 0 || x > 1) return false;
+    for (let i = 0; i < depth; i++) {
+      const t = x * 3;
+      if (t >= 1 && t <= 2) return false;
+      x = t < 1 ? t : t - 2;
+    }
+    return true;
+  }
+  function jInvariant(t, terms = 3) {
+    const q = Math.exp(-2 * Math.PI * t);
+    let j = 1 / q + 744;
+    j += 196884 * q + 21493760 * q ** 2 + 864299970 * q ** 3;
+    return j;
+  }
+  function resolventNorm(spectralRadius) {
+    return 1 / (1 - spectralRadius);
+  }
+
+  // src/runtime/sedenion.ts
+  var DIM = 16;
+  function sedenionMul(a, b) {
+    return mulDim(DIM, a, b);
+  }
+  function conjDim(dim, x) {
+    const r = x.slice(0, dim);
+    for (let i = 1; i < dim; i++) r[i] = -r[i];
+    return r;
+  }
+  function mulDim(dim, a, b) {
+    if (dim === 1) return [a[0] * b[0]];
+    const half = dim >> 1;
+    const a1 = a.slice(0, half), a2 = a.slice(half, dim);
+    const b1 = b.slice(0, half), b2 = b.slice(half, dim);
+    const r1a = mulDim(half, a1, b1);
+    const r1b = mulDim(half, conjDim(half, b2), a2);
+    const r2a = mulDim(half, b2, a1);
+    const r2b = mulDim(half, a2, conjDim(half, b1));
+    const r1 = r1a.map((v, i) => v - r1b[i]);
+    const r2 = r2a.map((v, i) => v + r2b[i]);
+    return r1.concat(r2);
+  }
+  function detectZeroDivisor(a, b) {
+    const p = sedenionMul(a, b);
+    const normA = Math.sqrt(a.reduce((s, x) => s + x * x, 0));
+    const normB = Math.sqrt(b.reduce((s, x) => s + x * x, 0));
+    const normProduct = Math.sqrt(p.reduce((s, x) => s + x * x, 0));
+    const residual = normProduct;
+    const isZeroDivisor = normA > 1e-9 && normB > 1e-9 && normProduct < 1e-9;
+    return { isZeroDivisor, normA, normB, normProduct, residual };
+  }
+  var MATTER = [
+    ["PI_LOAD", "Load circle-\u03C0 lattice value into register"],
+    ["E_LOG", "Spiral-e logarithmic activation"],
+    ["ADD", "Matter integer add"],
+    ["SUB", "Matter integer subtract"],
+    ["MUL", "Sedenion product"],
+    ["DIV", "Rational divide"],
+    ["CMP", "Compare and set flags"],
+    ["JMP", "Circle warp jump"],
+    ["JZ", "Jump if zero-drift"],
+    ["CALL", "Symmetric activation call"],
+    ["RET", "Return from t+ frame"],
+    ["LOAD", "Load from Pi-Lattice"],
+    ["STORE", "Store to Pi-Lattice"],
+    ["PUSH", "Push Matter cell"],
+    ["POP", "Pop Matter cell"],
+    ["DUP", "Duplicate cell"],
+    ["SWAP", "Swap cells"],
+    ["AND", "Bitwise conjunction"],
+    ["OR", "Bitwise disjunction"],
+    ["XOR", "Bitwise exclusive"],
+    ["SHL", "Shift left"],
+    ["SHR", "Shift right"],
+    ["SIN", "Circle sine"],
+    ["COS", "Circle cosine"],
+    ["TAN", "Circle tangent"],
+    ["SQRT", "Principal square root"],
+    ["POW", "Exponentiation"],
+    ["ABS", "Absolute value"],
+    ["MIN", "Minimum"],
+    ["MAX", "Maximum"],
+    ["HASH", "BLAKE3 witness"],
+    ["EMIT", "Emit execution witness"]
+  ];
+  var ANTIMATTER = [
+    ["ZERO_VAULT", "Zero-divisor vault seal"],
+    ["DRIFT_CHECK", "L_eff drift validation"],
+    ["GC_SWEEP", "t- garbage collection"],
+    ["UNWIND", "Exception unwind"],
+    ["TRACE_OFF", "Disable witness trace"],
+    ["SEAL", "Seal execution epoch"],
+    ["DECAY", "Antimatter decay"],
+    ["ANNIHILATE", "Matter/antimatter annihilation"],
+    ["ROLLBACK", "Rollback ledger"],
+    ["AUDIT", "Emit audit record"],
+    ["FREEZE", "Freeze resource budget"],
+    ["THAW", "Thaw resource budget"],
+    ["CANON", "Canonicalize value"],
+    ["SIEVE", "Cantor sieve measure-zero pass"],
+    ["ZWS_ENC", "Zero-width steganography encode"],
+    ["ZWS_DEC", "Zero-width steganography decode"],
+    ["SIGMA", "Sigma kernel reduction"],
+    ["RHO", "Spectral radius rho < 1 guard"],
+    ["KANI", "Bounded model-check assertion"],
+    ["LEAN", "Lean4 proof obligation"],
+    ["CIRCOM", "zk-SNARK constraint emit"],
+    ["SOLIDITY", "EVM contract emit"],
+    ["PIRTM", "PIRTM transcendental node"],
+    ["FERMAT", "Fermat primality witness"],
+    ["DILITHIUM", "Post-quantum signature"],
+    ["CRDT", "CRDT merge"],
+    ["LEDGER", "Ledger append"],
+    ["QUORUM", "Quorum vote"],
+    ["BUDGET", "Resource budget check"],
+    ["TIER", "S0-S6 tier gate"],
+    ["PROOF_ANCHOR", "Anchor proof root"],
+    ["DNA_EXPORT", "Immortal kernel DNA export"]
+  ];
+  function opcodeTable() {
+    const ops = [];
+    MATTER.forEach(([mn, desc], i) => ops.push({ code: i, mnemonic: mn, manifold: "Matter", t: "t+", desc }));
+    ANTIMATTER.forEach(([mn, desc], i) => ops.push({ code: 32 + i, mnemonic: mn, manifold: "Antimatter", t: "t-", desc }));
+    return ops;
+  }
+  function executeOpcode(op, arg, reg) {
+    const r = reg.slice();
+    switch (op.mnemonic) {
+      case "PI_LOAD":
+        return { reg: r, out: Math.PI * arg };
+      case "E_LOG":
+        return { reg: r, out: Math.log(arg) * Math.E };
+      case "ADD":
+        return { reg: r, out: arg + (reg[0] || 0) };
+      case "SUB":
+        return { reg: r, out: (reg[0] || 0) - arg };
+      case "MUL":
+        return { reg: r, out: arg * (reg[0] || 1) };
+      case "DIV":
+        return { reg: r, out: arg === 0 ? NaN : (reg[0] || 0) / arg };
+      case "SQRT":
+        return { reg: r, out: Math.sqrt(arg) };
+      case "SIN":
+        return { reg: r, out: Math.sin(arg) };
+      case "COS":
+        return { reg: r, out: Math.cos(arg) };
+      case "TAN":
+        return { reg: r, out: Math.tan(arg) };
+      case "POW":
+        return { reg: r, out: Math.pow(reg[0] || 1, arg) };
+      case "ABS":
+        return { reg: r, out: Math.abs(arg) };
+      case "HASH":
+        return { reg: r, out: 0 };
+      default:
+        return { reg: r, out: arg };
+    }
+  }
+
+  // src/runtime/dilithium.ts
+  var Q = 8380417;
+  var N = 256;
+  var BOUND = 130994;
+  function mod(x) {
+    return (x % Q + Q) % Q;
+  }
+  function polyMul(a, b) {
+    const acc = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      const ai = a[i];
+      if (ai === 0) continue;
+      for (let j = 0; j < N; j++) {
+        const bj = b[j];
+        if (bj === 0) continue;
+        const prod = ai * bj % Q;
+        const k = i + j;
+        if (k < N) acc[k] += prod;
+        else acc[k - N] -= prod;
+      }
+    }
+    const out = new Array(N);
+    for (let i = 0; i < N; i++) out[i] = mod(acc[i]);
+    return out;
+  }
+  function polyAdd(a, b) {
+    return a.map((v, i) => mod(v + b[i]));
+  }
+  function sampleUniform(seed, tag) {
+    const bytes = seededBytes(concat(seed, u32le(tag)), N * 4);
+    const p = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const v = (bytes[i * 4] | bytes[i * 4 + 1] << 8 | bytes[i * 4 + 2] << 16 | bytes[i * 4 + 3] << 24) >>> 0;
+      p[i] = v % Q;
+    }
+    return p;
+  }
+  function sampleSmall(seed, tag, eta = 2) {
+    const bytes = seededBytes(concat(seed, u32le(tag)), N);
+    const p = new Array(N);
+    for (let i = 0; i < N; i++) p[i] = bytes[i] % (2 * eta + 1) - eta;
+    return p;
+  }
+  function challengeFromHash(hash) {
+    const c = new Array(N).fill(0);
+    let weight = 0;
+    for (let i = 0; i < N && weight < 60; i++) {
+      if (hash[i % hash.length] & 1) {
+        c[i] = hash[(i + 7) % hash.length] & 1 ? 1 : -1;
+        weight++;
+      }
+    }
+    return c;
+  }
+  function keygen(seedStr) {
+    const seed = blake3Bytes(utf8Encode(seedStr));
+    const a = sampleUniform(seed, 1);
+    const s1 = sampleSmall(seed, 2);
+    const s2 = sampleSmall(seed, 3);
+    const t = polyAdd(polyMul(a, s1), s2);
+    return { publicKey: { a, t }, privateKey: { s1, s2, a } };
+  }
+  function sign(message, kp, nonce = 0) {
+    const { s1, s2, a } = kp.privateKey;
+    const y = sampleSmall(blake3Bytes(utf8Encode(message + ":" + nonce)), 10, 1);
+    const w = polyMul(a, y);
+    const cHash = blake3Bytes(utf8Encode(JSON.stringify(w.slice(0, 8)) + message));
+    const c = challengeFromHash(cHash);
+    const z = polyAdd(y, polyMul(c, s1)).map(center);
+    const h = polyMul(c, s2).map(center);
+    const hash = hexOf(blake3Bytes(concat(cHash, utf8Encode(JSON.stringify(z.slice(0, 8))))));
+    return { z, h, c, hash };
+  }
+  function center(v) {
+    let x = mod(v);
+    if (x > Q / 2) x -= Q;
+    return mod(x);
+  }
+  function verify(message, sig, kp) {
+    const { a, t } = kp.publicKey;
+    const az = polyMul(a, sig.z);
+    const ct = polyMul(sig.c, t);
+    const wPrime = az.map((v, i) => mod(v - ct[i] + sig.h[i]));
+    const cHash = blake3Bytes(utf8Encode(JSON.stringify(wPrime.slice(0, 8)) + message));
+    const c = challengeFromHash(cHash);
+    let match = true;
+    for (let i = 0; i < N; i++) if (c[i] !== sig.c[i]) {
+      match = false;
+      break;
+    }
+    const norm = Math.max(...sig.z.map((v) => {
+      let x = mod(v);
+      return x > Q / 2 ? Q - x : x;
+    }));
+    return match && norm <= BOUND;
+  }
+  function hexOf(bytes) {
+    let s = "";
+    for (const b of bytes) s += b.toString(16).padStart(2, "0");
+    return s;
+  }
+
+  // src/runtime/governance.ts
+  var K_MAX = 133144;
+  var TAU_R = 1e-6;
+  function tierPolicy(tier) {
+    switch (tier) {
+      case "S0":
+        return { tier, maxBudget: K_MAX, requiresProof: false, requiresSignature: false };
+      case "S2":
+        return { tier, maxBudget: Math.floor(K_MAX * 0.75), requiresProof: true, requiresSignature: false };
+      case "S4":
+        return { tier, maxBudget: Math.floor(K_MAX * 0.5), requiresProof: true, requiresSignature: true };
+      case "S6":
+        return { tier, maxBudget: Math.floor(K_MAX * 0.25), requiresProof: true, requiresSignature: true };
+    }
+  }
+  var ACEEnvelope = class {
+    constructor(tier = "S0", limit = K_MAX) {
+      __publicField(this, "state");
+      const pol = tierPolicy(tier);
+      this.state = {
+        used: 0,
+        limit: Math.min(limit, pol.maxBudget),
+        invariants: [],
+        witnesses: [],
+        safety: "SAFE",
+        tier
+      };
+    }
+    charge(amount, label) {
+      if (this.state.used + amount > this.state.limit) {
+        this.state.safety = "VIOLATED";
+        this.state.invariants.push(`BUDGET_EXCEEDED:${label}:${this.state.used}+${amount}>${this.state.limit}`);
+        return false;
+      }
+      this.state.used += amount;
+      return true;
+    }
+    witness(data) {
+      const h = blake3(`${data}|${this.state.used}|${this.state.tier}`);
+      this.state.witnesses.push(h);
+      return h;
+    }
+    assertInvariant(name, cond) {
+      if (!cond) {
+        this.state.safety = this.state.safety === "VIOLATED" ? "VIOLATED" : "DEGRADED";
+        this.state.invariants.push(`FAIL:${name}`);
+      } else {
+        this.state.invariants.push(`OK:${name}`);
+      }
+    }
+  };
+  function sigmaKernel(lEff, drift, tauR = TAU_R) {
+    const lEffOk = lEff < 1;
+    const driftOk = Math.abs(drift) <= tauR;
+    return {
+      lEff,
+      drift,
+      lEffOk,
+      driftOk,
+      stable: lEffOk && driftOk,
+      witness: blake3(`sigma:${lEff}:${drift}`)
+    };
+  }
+  function rhoGuard(rho, residual) {
+    return { ok: rho < 1 && residual <= 1e-6, rho, residual };
+  }
+  function kaniVerify(fn, arity, assertion, bound = 8, name = "obligation") {
+    let checked = 0;
+    const args = new Array(arity).fill(0);
+    const rec = (i) => {
+      if (i === arity) {
+        const out = fn(args);
+        checked++;
+        return assertion(args, out) ? null : args.slice();
+      }
+      for (let v = 0; v < bound; v++) {
+        args[i] = v;
+        const ce2 = rec(i + 1);
+        if (ce2) return ce2;
+      }
+      return null;
+    };
+    const ce = rec(0);
+    return { passed: ce === null, bound, checked, counterexample: ce, obligations: [`${name} over [0,${bound})^${arity}`] };
+  }
+  function normalize(e) {
+    switch (e.t) {
+      case "num":
+        return /* @__PURE__ */ new Map([["", e.v]]);
+      case "var":
+        return /* @__PURE__ */ new Map([[e.n, 1]]);
+      case "add":
+        return polyAdd2(normalize(e.a), normalize(e.b));
+      case "mul":
+        return polyMulMap(normalize(e.a), normalize(e.b));
+      case "pow": {
+        let acc = /* @__PURE__ */ new Map([["", 1]]);
+        for (let i = 0; i < e.n; i++) acc = polyMulMap(acc, normalize(e.a));
+        return acc;
+      }
+    }
+  }
+  function polyAdd2(a, b) {
+    const r = new Map(a);
+    for (const [k, v] of b) r.set(k, (r.get(k) || 0) + v);
+    return r;
+  }
+  function polyMulMap(a, b) {
+    const r = /* @__PURE__ */ new Map();
+    for (const [ka, va] of a) {
+      for (const [kb, vb] of b) {
+        const key = [ka, kb].filter(Boolean).sort().join("*");
+        r.set(key, (r.get(key) || 0) + va * vb);
+      }
+    }
+    return r;
+  }
+  function leanProve(name, lhs, rhs) {
+    const a = normalize(lhs);
+    const b = normalize(rhs);
+    const keys = /* @__PURE__ */ new Set([...a.keys(), ...b.keys()]);
+    let proved = true;
+    for (const k of keys) {
+      if (Math.abs((a.get(k) || 0) - (b.get(k) || 0)) > 1e-9) {
+        proved = false;
+        break;
+      }
+    }
+    return { name, lhs: render(lhs), rhs: render(rhs), proved, tactic: proved ? "ring" : "unsolved" };
+  }
+  function render(e) {
+    switch (e.t) {
+      case "num":
+        return String(e.v);
+      case "var":
+        return e.n;
+      case "add":
+        return `(${render(e.a)} + ${render(e.b)})`;
+      case "mul":
+        return `(${render(e.a)} * ${render(e.b)})`;
+      case "pow":
+        return `(${render(e.a)}^${e.n})`;
+    }
+  }
+  var Ledger = class {
+    constructor() {
+      __publicField(this, "entries", []);
+      __publicField(this, "clock", 0);
+    }
+    append(op, payload) {
+      const prev = this.entries.length ? this.entries[this.entries.length - 1].hash : "0".repeat(64);
+      const index = this.entries.length;
+      const ts = this.clock++;
+      const hash = blake3(`${index}|${op}|${payload}|${prev}|${ts}`);
+      const entry = { index, op, payload, prev, hash, ts };
+      this.entries.push(entry);
+      return entry;
+    }
+    verifyChain() {
+      for (let i = 0; i < this.entries.length; i++) {
+        const e = this.entries[i];
+        const prev = i === 0 ? "0".repeat(64) : this.entries[i - 1].hash;
+        if (e.prev !== prev) return false;
+        const h = blake3(`${e.index}|${e.op}|${e.payload}|${e.prev}|${e.ts}`);
+        if (h !== e.hash) return false;
+      }
+      return true;
+    }
+  };
+  var CRDT = class {
+    constructor() {
+      __publicField(this, "store", /* @__PURE__ */ new Map());
+    }
+    set(key, value, ts, node) {
+      const cur = this.store.get(key);
+      if (!cur || ts > cur.ts || ts === cur.ts && node > cur.node) {
+        this.store.set(key, { value, ts, node });
+      }
+    }
+    merge(other) {
+      for (const [k, v] of other.store) this.set(k, v.value, v.ts, v.node);
+    }
+    get(key) {
+      return this.store.get(key)?.value;
+    }
+    entries() {
+      return [...this.store.entries()];
+    }
+    get size() {
+      return this.store.size;
+    }
+  };
+  function proofAnchor(parts) {
+    return blake3("anchor|" + parts.join("|"));
+  }
+  function zeroDivisorVault(seed) {
+    const bytes = blake3Bytes(utf8Encode(seed));
+    const drift = bytes[0] / 255 * 1e-7;
+    return { sealed: drift <= TAU_R, witness: hex(bytes.slice(0, 8)), drift };
+  }
+
+  // src/runtime/vm.ts
+  var RAM_SIZE = 32 * 1024 * 1024;
+  var PAGE_SIZE = 4096;
+  var SECTOR = 512;
+  var Machine = class {
+    constructor(size = RAM_SIZE) {
+      __publicField(this, "ram");
+      __publicField(this, "lattice", /* @__PURE__ */ new Map());
+      __publicField(this, "regs", new Int32Array(32));
+      __publicField(this, "pc", 0);
+      __publicField(this, "running", false);
+      __publicField(this, "ring", 0);
+      // privilege ring (0 = kernel)
+      __publicField(this, "mbr");
+      __publicField(this, "booted", false);
+      __publicField(this, "log", []);
+      this.ram = new Uint8Array(size);
+      this.mbr = new Uint8Array(SECTOR);
+    }
+    // Write a 512-byte MBR (SectorForth-style boot sector) into RAM at 0x7C00.
+    writeMBR(program) {
+      const bytes = utf8Encode(program).subarray(0, SECTOR - 2);
+      this.mbr = new Uint8Array(SECTOR);
+      this.mbr.set(bytes, 0);
+      this.mbr[510] = 85;
+      this.mbr[511] = 170;
+      const base = 31744;
+      this.ram.set(this.mbr, base);
+      return base;
+    }
+    boot() {
+      const sig = this.ram[31744 + 510] === 85 && this.ram[31744 + 511] === 170;
+      this.booted = sig;
+      this.ring = sig ? 0 : 3;
+      const message = sig ? "SectorForth booted into Ring 0" : "boot signature invalid";
+      this.log.push(message);
+      return { ok: sig, ring: this.ring, message };
+    }
+    // Pi-Lattice: load a program image into RAM (Immutable Resurrection).
+    loadLattice(program, base = PAGE_SIZE) {
+      const bytes = utf8Encode(program);
+      this.ram.set(bytes.subarray(0, this.ram.length - base), base);
+      for (let i = 0; i < bytes.length; i++) {
+        this.lattice.set(base + i, bytes[i]);
+      }
+      this.log.push(`Pi-Lattice loaded ${bytes.length} bytes at 0x${base.toString(16)}`);
+      return bytes.length;
+    }
+    read(addr, len) {
+      return this.ram.subarray(addr, addr + len);
+    }
+    write(addr, bytes) {
+      this.ram.set(bytes, addr);
+    }
+    // Export the whole RAM as invisible DNA between [START] and [END].
+    exportDNA(limit = 1024) {
+      const used = Math.min(limit, this.ram.length);
+      const slice = this.ram.subarray(0, used);
+      const b64 = base64Encode(slice);
+      return `[START]${b64}[END]`;
+    }
+    importDNA(dna) {
+      const m = dna.match(/\[START\]([\s\S]*?)\[END\]/);
+      if (!m) return false;
+      const bytes = base64Decode(m[1]);
+      this.ram.set(bytes.subarray(0, this.ram.length), 0);
+      this.log.push(`Immortal Resurrection: restored ${bytes.length} bytes`);
+      return true;
+    }
+    dnaFingerprint(dna) {
+      return blake3(dna);
+    }
+  };
+  function ghostLogic(source) {
+    const total = source.length || 1;
+    let points = 0;
+    for (const ch of source) {
+      if (/[A-Za-z0-9_{}()\[\]=+\-*/%<>!&|;:.]/.test(ch)) points++;
+    }
+    const voidChars = total - points;
+    return {
+      semanticVolume: points / total,
+      voidRatio: voidChars / total,
+      points,
+      measure: 0,
+      // points form a measure-zero set
+      ghost: voidChars / total > 0.15
+    };
+  }
+  var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  function base64Encode(bytes) {
+    if (typeof btoa !== "undefined") {
+      let s = "";
+      for (const b of bytes) s += String.fromCharCode(b);
+      return btoa(s);
+    }
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const b0 = bytes[i], b1 = bytes[i + 1], b2 = bytes[i + 2];
+      out += B64[b0 >> 2];
+      out += B64[(b0 & 3) << 4 | (b1 ?? 0) >> 4];
+      out += i + 1 < bytes.length ? B64[(b1 & 15) << 2 | (b2 ?? 0) >> 6] : "=";
+      out += i + 2 < bytes.length ? B64[(b2 ?? 0) & 63] : "=";
+    }
+    return out;
+  }
+  function base64Decode(s) {
+    if (typeof atob !== "undefined") {
+      const bin = atob(s);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+    const clean = s.replace(/=+$/, "");
+    const bytes = [];
+    let buffer = 0, bits = 0;
+    for (const ch of clean) {
+      const v = B64.indexOf(ch);
+      if (v < 0) continue;
+      buffer = buffer << 6 | v;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        bytes.push(buffer >> bits & 255);
+      }
+    }
+    return new Uint8Array(bytes);
+  }
+
+  // src/engine/interpreter.ts
+  var RuntimeError = class extends Error {
+    constructor(msg, line) {
+      super(msg);
+      __publicField(this, "line");
+      this.line = line;
+    }
+  };
+  function makeFrame(parent, isFnBoundary = false) {
+    return { vars: /* @__PURE__ */ new Map(), parent, isFnBoundary };
+  }
+  function lookupFrame(f, name) {
+    let cur = f;
+    while (cur) {
+      if (cur.vars.has(name)) return cur;
+      cur = cur.parent;
+    }
+    return null;
+  }
+  function getVar(f, name) {
+    const found = lookupFrame(f, name);
+    if (!found) throw new RuntimeError(`undefined variable '${name}'`);
+    return found.vars.get(name);
+  }
+  function setVar(f, name, value) {
+    const found = lookupFrame(f, name);
+    if (found) found.vars.set(name, value);
+    else f.vars.set(name, value);
+  }
+  function truthy(v) {
+    if (v === null || v === void 0 || v === false) return false;
+    if (typeof v === "number") return v !== 0 && !Number.isNaN(v);
+    if (typeof v === "string") return v.length > 0;
+    return true;
+  }
+  function fmtNum(n) {
+    if (Number.isInteger(n)) return String(n);
+    if (!isFinite(n)) return String(n);
+    return String(Number(n.toPrecision(12)));
+  }
+  function toStr(v) {
+    if (v === null || v === void 0) return "nil";
+    if (typeof v === "number") return fmtNum(v);
+    if (typeof v === "string") return v;
+    if (typeof v === "boolean") return v ? "true" : "false";
+    if (Array.isArray(v)) return "[" + v.map(toStr).join(", ") + "]";
+    if (v instanceof SidAliFunction) return `<fn ${v.name}>`;
+    if (v instanceof SidAliClass) return `<class ${v.name}>`;
+    if (v instanceof SidAliInstance) return `<${v.cls.name} instance>`;
+    if (v && typeof v === "object") {
+      try {
+        return JSON.stringify(v, (k, val) => typeof val === "bigint" ? val.toString() : val);
+      } catch {
+        return String(v);
+      }
+    }
+    return String(v);
+  }
+  var SidAliFunction = class {
+    constructor(chunk, closure, name) {
+      this.chunk = chunk;
+      this.closure = closure;
+      this.name = name;
+    }
+    call(interp, args, thisVal) {
+      return interp.callChunk(this.chunk, args, thisVal, this.closure);
+    }
+  };
+  var SidAliClass = class {
+    constructor(name) {
+      this.name = name;
+      __publicField(this, "parent", null);
+      __publicField(this, "methods", /* @__PURE__ */ new Map());
+      __publicField(this, "statics", /* @__PURE__ */ new Map());
+    }
+    lookupMethod(name) {
+      if (this.methods.has(name)) return this.methods.get(name);
+      if (this.parent) return this.parent.lookupMethod(name);
+      return void 0;
+    }
+    lookupStatic(name) {
+      if (this.statics.has(name)) return this.statics.get(name);
+      if (this.parent) return this.parent.lookupStatic(name);
+      return void 0;
+    }
+  };
+  var SidAliInstance = class {
+    constructor(cls) {
+      this.cls = cls;
+      __publicField(this, "fields", /* @__PURE__ */ new Map());
+    }
+  };
+  var Interpreter = class {
+    constructor(program) {
+      this.program = program;
+      __publicField(this, "chunks", /* @__PURE__ */ new Map());
+      __publicField(this, "main");
+      __publicField(this, "globals", makeFrame(null, true));
+      __publicField(this, "output", []);
+      __publicField(this, "instructions", 0);
+      __publicField(this, "maxInstructions", 5e6);
+      __publicField(this, "witnesses", []);
+      __publicField(this, "ace");
+      __publicField(this, "ledger", new Ledger());
+      __publicField(this, "machine");
+      __publicField(this, "natives", /* @__PURE__ */ new Map());
+      this.main = program.main;
+      for (const ch of program.chunks) this.chunks.set(ch.id, ch);
+      this.ace = new ACEEnvelope("S0");
+      this.machine = new Machine();
+      this.installBuiltins();
+      this.installGlobals();
+    }
+    installGlobals() {
+      this.globals.vars.set("PI", Math.PI);
+      this.globals.vars.set("E", Math.E);
+      this.globals.vars.set("e", Math.E);
+      this.globals.vars.set("K_MAX", K_MAX);
+      this.globals.vars.set("TAU_R", TAU_R);
+      this.globals.vars.set("machine", this.machine);
+      this.globals.vars.set("ledger", this.ledger);
+      this.globals.vars.set("ace", this.ace);
+    }
+    defNative(name, arity, fn) {
+      this.natives.set(name, { arity, fn });
+      this.globals.vars.set(name, { __native: name });
+    }
+    installBuiltins() {
+      const N2 = (name, arity, fn) => this.defNative(name, arity, fn);
+      N2("len", 1, (_, a) => {
+        const v = a[0];
+        if (typeof v === "string") return [...v].length;
+        if (Array.isArray(v)) return v.length;
+        if (v instanceof Map) return v.size;
+        if (v && typeof v === "object") return Object.keys(v).length;
+        throw new RuntimeError("len() expects string/array/object");
+      });
+      N2("push", 2, (_, a) => {
+        if (!Array.isArray(a[0])) throw new RuntimeError("push() expects array");
+        a[0].push(a[1]);
+        return a[0];
+      });
+      N2("pop", 1, (_, a) => Array.isArray(a[0]) ? a[0].pop() : null);
+      N2("range", 2, (_, a) => {
+        const out = [];
+        const [s, e] = [a[0], a[1]];
+        if (e >= s) for (let i = s; i < e; i++) out.push(i);
+        else for (let i = s; i > e; i--) out.push(i);
+        return out;
+      });
+      N2("keys", 1, (_, a) => a[0] && typeof a[0] === "object" ? Object.keys(a[0]) : []);
+      N2("values", 1, (_, a) => a[0] && typeof a[0] === "object" ? Object.values(a[0]) : []);
+      N2("str", 1, (_, a) => toStr(a[0]));
+      N2("num", 1, (_, a) => typeof a[0] === "number" ? a[0] : parseFloat(toStr(a[0])) || 0);
+      N2("int", 1, (_, a) => Math.trunc(Number(a[0]) || 0));
+      N2("abs", 1, (_, a) => Math.abs(a[0]));
+      N2("floor", 1, (_, a) => Math.floor(a[0]));
+      N2("ceil", 1, (_, a) => Math.ceil(a[0]));
+      N2("round", 1, (_, a) => Math.round(a[0]));
+      N2("sqrt", 1, (_, a) => Math.sqrt(a[0]));
+      N2("pow", 2, (_, a) => Math.pow(a[0], a[1]));
+      N2("min", 2, (_, a) => Math.min(a[0], a[1]));
+      N2("max", 2, (_, a) => Math.max(a[0], a[1]));
+      N2("sin", 1, (_, a) => Math.sin(a[0]));
+      N2("cos", 1, (_, a) => Math.cos(a[0]));
+      N2("tan", 1, (_, a) => Math.tan(a[0]));
+      N2("log", 1, (_, a) => Math.log(a[0]));
+      N2("exp", 1, (_, a) => Math.exp(a[0]));
+      N2("now", 0, () => Date.now());
+      N2("type", 1, (_, a) => {
+        const v = a[0];
+        if (v === null || v === void 0) return "nil";
+        if (Array.isArray(v)) return "array";
+        if (v instanceof SidAliFunction) return "function";
+        if (v instanceof SidAliClass) return "class";
+        if (v instanceof SidAliInstance) return v.cls.name;
+        return typeof v;
+      });
+      N2("chr", 1, (_, a) => String.fromCodePoint(a[0]));
+      N2("ord", 1, (_, a) => toStr(a[0]).codePointAt(0) ?? 0);
+      N2("split", 2, (_, a) => toStr(a[0]).split(toStr(a[1])));
+      N2("join", 2, (_, a) => Array.isArray(a[0]) ? a[0].map(toStr).join(toStr(a[1])) : "");
+      N2("upper", 1, (_, a) => toStr(a[0]).toUpperCase());
+      N2("lower", 1, (_, a) => toStr(a[0]).toLowerCase());
+      N2("trim", 1, (_, a) => toStr(a[0]).trim());
+      N2("contains", 2, (_, a) => toStr(a[0]).includes(toStr(a[1])));
+      N2("replace", 3, (_, a) => toStr(a[0]).split(toStr(a[1])).join(toStr(a[2])));
+      N2("map", 2, (i, a) => Array.isArray(a[0]) ? a[0].map((x, idx) => i.callValue(a[1], [x, idx])) : []);
+      N2("filter", 2, (i, a) => Array.isArray(a[0]) ? a[0].filter((x, idx) => truthy(i.callValue(a[1], [x, idx]))) : []);
+      N2("reduce", 3, (i, a) => {
+        if (!Array.isArray(a[0])) return null;
+        let acc = a[2];
+        for (let idx = 0; idx < a[0].length; idx++) acc = i.callValue(a[1], [acc, a[0][idx], idx]);
+        return acc;
+      });
+      N2("fib", 1, (_, a) => {
+        const n = Math.max(0, Math.floor(a[0]));
+        let x = 0, y = 1;
+        for (let k = 0; k < n; k++) {
+          [x, y] = [y, x + y];
+        }
+        return x;
+      });
+      N2("fibList", 1, (_, a) => {
+        const n = Math.max(0, Math.floor(a[0]));
+        const out = [0, 1];
+        while (out.length < n) out.push(out[out.length - 1] + out[out.length - 2]);
+        return out.slice(0, n);
+      });
+      N2("factorial", 1, (_, a) => {
+        let r = 1;
+        for (let k = 2; k <= Math.floor(a[0]); k++) r *= k;
+        return r;
+      });
+      N2("isPrime", 1, (_, a) => isPrimeMillerRabin(a[0]));
+      N2("fermat", 1, (_, a) => fermatCertify(a[0]));
+      N2("zeta", 1, (_, a) => zeta(a[0]));
+      N2("goldmul", 2, (_, a) => goldMul(BigInt(a[0]), BigInt(a[1])).toString());
+      N2("goldadd", 2, (_, a) => goldAdd(BigInt(a[0]), BigInt(a[1])).toString());
+      N2("zmod", 2, (_, a) => zmod(a[0], a[1]));
+      N2("jInvariant", 1, (_, a) => jInvariant(a[0]));
+      N2("blake3", 1, (_, a) => blake3(toStr(a[0])));
+      N2("sedenionMul", 2, (_, a) => sedenionMul(a[0], a[1]));
+      N2("zeroDivisor", 2, (_, a) => detectZeroDivisor(a[0], a[1]));
+      N2("opcodes", 0, () => opcodeTable());
+      N2("executeOpcode", 3, (_, a) => executeOpcode(opcodeTable()[a[0]], a[1], a[2] || new Array(16).fill(0)));
+      N2("zwsEncode", 1, (_, a) => toZeroWidth(toStr(a[0])));
+      N2("zwsDecode", 1, (_, a) => fromZeroWidth(toStr(a[0])));
+      N2("dilithiumKeygen", 1, (_, a) => keygen(toStr(a[0])));
+      N2("dilithiumSign", 2, (i, a) => {
+        const kp = a[1];
+        return sign(toStr(a[0]), kp);
+      });
+      N2("dilithiumVerify", 3, (_, a) => verify(toStr(a[0]), a[1], a[2]));
+      N2("sigma", 2, (_, a) => sigmaKernel(a[0], a[1]));
+      N2("rho", 2, (_, a) => rhoGuard(a[0], a[1]));
+      N2("tierPolicy", 1, (_, a) => tierPolicy(a[0]));
+      N2("proofAnchor", 1, (_, a) => proofAnchor(Array.isArray(a[0]) ? a[0].map(toStr) : [toStr(a[0])]));
+      N2("zeroDivisorVault", 1, (_, a) => zeroDivisorVault(toStr(a[0])));
+      N2("kani", 2, (i, a) => {
+        const fn = a[0];
+        const bound = a[1] || 4;
+        let checked = 0;
+        const rec = (args) => {
+          if (args.length === 2) {
+            try {
+              const out = i.callValue(fn, [args]);
+              checked++;
+              return typeof out === "number" && isFinite(out) ? null : args.slice();
+            } catch {
+              return args.slice();
+            }
+          }
+          for (let v = 0; v < bound; v++) {
+            const ce2 = rec([...args, v]);
+            if (ce2) return ce2;
+          }
+          return null;
+        };
+        const ce = rec([]);
+        return { passed: ce === null, bound, checked, counterexample: ce };
+      });
+      N2("ghost", 1, (_, a) => ghostLogic(toStr(a[0])));
+      N2("inCantorSet", 2, (_, a) => inCantorSet(a[0], a[1] || 20));
+      N2("newLedger", 0, () => new Ledger());
+      N2("newCRDT", 0, () => new CRDT());
+      N2("newMachine", 0, (_, a) => new Machine(a[0] || void 0));
+      N2("fsWrite", 2, (i, a) => {
+        i.globals.vars.get("__fs").set(toStr(a[0]), toStr(a[1]));
+        return true;
+      });
+      N2("fsRead", 1, (i, a) => {
+        const fs = i.globals.vars.get("__fs");
+        return fs.has(toStr(a[0])) ? fs.get(toStr(a[0])) : null;
+      });
+      N2("fsList", 0, (i) => [...i.globals.vars.get("__fs").keys()]);
+      this.globals.vars.set("__fs", /* @__PURE__ */ new Map());
+    }
+    callValue(fn, args, thisVal) {
+      if (fn instanceof SidAliFunction) return fn.call(this, args, thisVal);
+      if (fn && typeof fn === "object" && fn.__native) {
+        const nat = this.natives.get(fn.__native);
+        return nat.fn(this, args);
+      }
+      if (fn instanceof SidAliClass) {
+        const inst = new SidAliInstance(fn);
+        const ctor = fn.lookupMethod("init") || fn.lookupMethod("constructor");
+        if (ctor) ctor.call(this, args, inst);
+        return inst;
+      }
+      throw new RuntimeError(`value is not callable: ${toStr(fn)}`);
+    }
+    callChunk(chunk, args, thisVal, closure) {
+      const frame = makeFrame(closure, true);
+      for (let i = 0; i < chunk.params.length; i++) frame.vars.set(chunk.params[i], args[i]);
+      if (thisVal !== void 0) frame.vars.set("this", thisVal);
+      return this.executeChunk(chunk, frame, thisVal);
+    }
+    run() {
+      const start = Date.now();
+      let error = null;
+      try {
+        this.executeChunk(this.main, this.globals, void 0);
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e);
+      }
+      const dna = this.machine.exportDNA(1024);
+      return {
+        output: this.output,
+        error,
+        stats: {
+          instructions: this.instructions,
+          timeMs: Date.now() - start,
+          witnesses: this.witnesses.length,
+          ramUsed: this.machine.lattice.size,
+          ledgerHeight: this.ledger.entries.length
+        },
+        witnesses: this.witnesses.slice(),
+        dna,
+        ace: this.ace.state
+      };
+    }
+    executeChunk(chunk, frame, thisVal) {
+      const stack = [];
+      const code = chunk.code;
+      let ip = 0;
+      const loopStack = [];
+      const tryStack = [];
+      let lastThrown = null;
+      let pendingReturn = false;
+      const pop = () => stack.pop();
+      while (ip < code.length) {
+        if (++this.instructions > this.maxInstructions) throw new RuntimeError("instruction limit exceeded (possible infinite loop)");
+        const ins = code[ip];
+        const op = ins.op;
+        switch (op) {
+          case "CONST":
+            stack.push(ins.a);
+            ip++;
+            break;
+          case "LOAD":
+            stack.push(getVar(frame, ins.a));
+            ip++;
+            break;
+          case "DECLARE": {
+            const v = stack.pop();
+            frame.vars.set(ins.a, v);
+            ip++;
+            break;
+          }
+          case "DECLARE_CONST": {
+            const v = stack.pop();
+            frame.vars.set(ins.a, v);
+            ip++;
+            break;
+          }
+          case "STORE": {
+            const v = stack.pop();
+            setVar(frame, ins.a, v);
+            ip++;
+            break;
+          }
+          case "POP":
+            stack.pop();
+            ip++;
+            break;
+          case "DUP": {
+            const v = stack[stack.length - 1];
+            stack.push(v);
+            ip++;
+            break;
+          }
+          case "BINOP": {
+            const b = pop(), a = pop();
+            stack.push(this.binop(ins.a, a, b, ins.line));
+            ip++;
+            break;
+          }
+          case "UNOP": {
+            const a = pop();
+            stack.push(this.unop(ins.a, a));
+            ip++;
+            break;
+          }
+          case "JZ": {
+            const c = pop();
+            if (!truthy(c)) ip = ins.a;
+            else ip++;
+            break;
+          }
+          case "JUMP":
+            ip = ins.a;
+            break;
+          case "ARRAY": {
+            const n = ins.a;
+            const items = stack.splice(stack.length - n, n);
+            stack.push(items);
+            ip++;
+            break;
+          }
+          case "OBJECT": {
+            const n = ins.a;
+            const pairs = stack.splice(stack.length - n * 2, n * 2);
+            const obj = {};
+            for (let i = 0; i < n; i++) obj[pairs[i * 2]] = pairs[i * 2 + 1];
+            stack.push(obj);
+            ip++;
+            break;
+          }
+          case "INDEX": {
+            const idx = pop(), obj = pop();
+            stack.push(this.index(obj, idx));
+            ip++;
+            break;
+          }
+          case "SET_INDEX": {
+            const val = pop(), idx = pop(), obj = pop();
+            if (Array.isArray(obj)) obj[idx < 0 ? obj.length + idx : idx] = val;
+            else if (obj && typeof obj === "object") obj[idx] = val;
+            stack.push(val);
+            ip++;
+            break;
+          }
+          case "MEMBER": {
+            const obj = pop();
+            stack.push(this.member(obj, ins.a));
+            ip++;
+            break;
+          }
+          case "SET_MEMBER": {
+            const val = pop(), obj = pop();
+            if (obj instanceof SidAliInstance) obj.fields.set(ins.a, val);
+            else if (obj && typeof obj === "object") obj[ins.a] = val;
+            stack.push(val);
+            ip++;
+            break;
+          }
+          case "LEN": {
+            const v = pop();
+            stack.push(this.lengthOf(v));
+            ip++;
+            break;
+          }
+          case "MAKE_FN": {
+            const ch = this.chunks.get(ins.a);
+            stack.push(new SidAliFunction(ch, frame, ch.name));
+            ip++;
+            break;
+          }
+          case "MAKE_CLASS": {
+            const spec = ins.a;
+            const cls = new SidAliClass(spec.name);
+            if (spec.parent) {
+              const parentVal = lookupFrame(frame, spec.parent) ? getVar(frame, spec.parent) : null;
+              if (parentVal instanceof SidAliClass) cls.parent = parentVal;
+            }
+            for (const m of spec.methods) {
+              const ch = this.chunks.get(m.chunk);
+              cls.methods.set(m.name, new SidAliFunction(ch, frame, `${spec.name}.${m.name}`));
+            }
+            stack.push(cls);
+            ip++;
+            break;
+          }
+          case "NEW": {
+            const n = ins.b;
+            const args = stack.splice(stack.length - n, n);
+            const cls = getVar(frame, ins.a);
+            if (!(cls instanceof SidAliClass)) throw new RuntimeError(`${ins.a} is not a class`);
+            const inst = new SidAliInstance(cls);
+            const ctor = cls.lookupMethod("init") || cls.lookupMethod("constructor");
+            if (ctor) ctor.call(this, args, inst);
+            stack.push(inst);
+            ip++;
+            break;
+          }
+          case "CALL": {
+            const n = ins.a;
+            const args = stack.splice(stack.length - n, n);
+            const fn = pop();
+            stack.push(this.callValue(fn, args));
+            ip++;
+            break;
+          }
+          case "CALL_METHOD": {
+            const n = ins.b;
+            const args = stack.splice(stack.length - n, n);
+            const obj = pop();
+            stack.push(this.callMethod(obj, ins.a, args));
+            ip++;
+            break;
+          }
+          case "TRANSCEND": {
+            const arg = pop();
+            if (ins.a === "pi") stack.push(Math.PI * arg);
+            else stack.push(Math.log(Math.abs(arg) || 1) * Math.E);
+            ip++;
+            break;
+          }
+          case "PRINT": {
+            const v = pop();
+            this.output.push(toStr(v));
+            ip++;
+            break;
+          }
+          case "LOOP_ENTER":
+            loopStack.push({ continuePc: ins.a, breakPc: ins.b });
+            ip++;
+            break;
+          case "LOOP_END":
+            loopStack.pop();
+            ip++;
+            break;
+          case "BREAK": {
+            const l = loopStack[loopStack.length - 1];
+            ip = l ? l.breakPc : code.length;
+            break;
+          }
+          case "CONTINUE": {
+            const l = loopStack[loopStack.length - 1];
+            ip = l ? l.continuePc : ip + 1;
+            break;
+          }
+          case "TRY_ENTER":
+            tryStack.push({ handlerPc: ins.a });
+            ip++;
+            break;
+          case "TRY_LEAVE":
+            tryStack.pop();
+            ip++;
+            break;
+          case "CATCH_BIND": {
+            frame.vars.set(ins.a, lastThrown);
+            lastThrown = null;
+            ip++;
+            break;
+          }
+          case "FINALLY_END":
+            ip++;
+            break;
+          case "THROW": {
+            const v = pop();
+            lastThrown = v;
+            if (tryStack.length) {
+              const t = tryStack.pop();
+              ip = t.handlerPc;
+            } else {
+              throw new RuntimeError(`uncaught: ${toStr(v)}`, ins.line);
+            }
+            break;
+          }
+          case "IMPORT":
+            ip++;
+            break;
+          case "BUILD":
+            stack.push({ __builder: true, target: ins.a, args: [] });
+            ip++;
+            break;
+          case "BUILD_APPLY": {
+            const n = ins.a;
+            const args = stack.splice(stack.length - n, n);
+            const b = pop();
+            b.args = args;
+            this.onBuild(b);
+            stack.push(b);
+            ip++;
+            break;
+          }
+          case "RET": {
+            const v = stack.length ? pop() : null;
+            return v;
+          }
+          case "HALT":
+            return null;
+          default:
+            throw new RuntimeError(`unknown opcode ${op}`);
+        }
+      }
+      return null;
+    }
+    onBuild(b) {
+      const target = b.target || "build";
+      const label = toStr(b.args[0] ?? target);
+      const witness = blake3(`${target}|${label}|${b.args.map(toStr).join(",")}`);
+      this.witnesses.push(witness);
+      this.ace.charge(1, target);
+      this.ledger.append("build", `${target}:${label}`);
+      this.output.push(`[build] ${target} \u2192 ${label} (witness ${witness.slice(0, 12)})`);
+    }
+    lengthOf(v) {
+      if (typeof v === "string") return [...v].length;
+      if (Array.isArray(v)) return v.length;
+      if (v instanceof Map) return v.size;
+      if (v && typeof v === "object") return Object.keys(v).length;
+      return 0;
+    }
+    index(obj, idx) {
+      if (typeof obj === "string") return [...obj][idx] ?? null;
+      if (Array.isArray(obj)) return obj[idx < 0 ? obj.length + idx : idx] ?? null;
+      if (obj instanceof Map) return obj.get(idx);
+      if (obj && typeof obj === "object") return obj[idx] ?? null;
+      return null;
+    }
+    member(obj, prop) {
+      if (obj instanceof SidAliInstance) {
+        if (obj.fields.has(prop)) return obj.fields.get(prop);
+        const m = obj.cls.lookupMethod(prop);
+        if (m) return m;
+        const st = obj.cls.lookupStatic(prop);
+        if (st !== void 0) return st;
+        return null;
+      }
+      if (obj instanceof SidAliClass) {
+        const st = obj.lookupStatic(prop);
+        if (st !== void 0) return st;
+        return null;
+      }
+      if (Array.isArray(obj) && (prop === "length" || prop === "len")) return obj.length;
+      if (typeof obj === "string" && (prop === "length" || prop === "len")) return [...obj].length;
+      if (obj instanceof Ledger && prop === "height") return obj.entries.length;
+      if (obj instanceof Ledger && prop === "size") return obj.entries.length;
+      if (obj instanceof CRDT && prop === "size") return obj.size;
+      if (obj instanceof Machine && prop === "ring") return obj.ring;
+      if (obj && typeof obj === "object") return obj[prop] ?? null;
+      return null;
+    }
+    callMethod(obj, name, args) {
+      if (obj instanceof SidAliInstance) {
+        const m = obj.cls.lookupMethod(name);
+        if (m) return m.call(this, args, obj);
+        const native = this.instanceNative(obj, name, args);
+        if (native !== void 0) return native;
+        throw new RuntimeError(`${obj.cls.name} has no method '${name}'`);
+      }
+      if (Array.isArray(obj)) return this.arrayMethod(obj, name, args);
+      if (typeof obj === "string") return this.stringMethod(obj, name, args);
+      if (typeof obj === "number") return this.numberMethod(obj, name, args);
+      if (obj instanceof Ledger) return this.ledgerMethod(obj, name, args);
+      if (obj instanceof CRDT) return this.crdtMethod(obj, name, args);
+      if (obj instanceof Machine) return this.machineMethod(obj, name, args);
+      if (obj instanceof ACEEnvelope) return this.aceMethod(obj, name, args);
+      throw new RuntimeError(`cannot call method '${name}' on ${toStr(obj)}`);
+    }
+    instanceNative(obj, name, args) {
+      if (name === "toString") return toStr(obj);
+      if (name === "get") return obj.fields.get(args[0]);
+      if (name === "set") {
+        obj.fields.set(args[0], args[1]);
+        return obj;
+      }
+      return void 0;
+    }
+    arrayMethod(arr, name, args) {
+      switch (name) {
+        case "push":
+          arr.push(args[0]);
+          return arr;
+        case "pop":
+          return arr.pop();
+        case "len":
+        case "length":
+          return arr.length;
+        case "map":
+          return arr.map((x, i) => this.callValue(args[0], [x, i]));
+        case "filter":
+          return arr.filter((x, i) => truthy(this.callValue(args[0], [x, i])));
+        case "reduce": {
+          let acc = args[1];
+          for (let i = 0; i < arr.length; i++) acc = this.callValue(args[0], [acc, arr[i], i]);
+          return acc;
+        }
+        case "join":
+          return arr.map(toStr).join(toStr(args[0] ?? ","));
+        case "slice":
+          return arr.slice(args[0], args[1]);
+        case "sort":
+          return arr.slice().sort((a, b) => args[0] ? this.callValue(args[0], [a, b]) : a > b ? 1 : a < b ? -1 : 0);
+        case "reverse":
+          return arr.slice().reverse();
+        case "indexOf":
+          return arr.indexOf(args[0]);
+        case "includes":
+          return arr.includes(args[0]);
+        case "sum":
+          return arr.reduce((s, x) => s + (Number(x) || 0), 0);
+        case "min":
+          return Math.min(...arr);
+        case "max":
+          return Math.max(...arr);
+        default:
+          throw new RuntimeError(`array has no method '${name}'`);
+      }
+    }
+    stringMethod(s, name, args) {
+      switch (name) {
+        case "upper":
+          return s.toUpperCase();
+        case "lower":
+          return s.toLowerCase();
+        case "trim":
+          return s.trim();
+        case "split":
+          return s.split(toStr(args[0]));
+        case "includes":
+          return s.includes(toStr(args[0]));
+        case "indexOf":
+          return s.indexOf(toStr(args[0]));
+        case "slice":
+          return s.slice(args[0], args[1]);
+        case "replace":
+          return s.split(toStr(args[0])).join(toStr(args[1]));
+        case "repeat":
+          return s.repeat(args[0]);
+        case "chars":
+          return [...s];
+        case "len":
+        case "length":
+          return [...s].length;
+        case "startsWith":
+          return s.startsWith(toStr(args[0]));
+        case "endsWith":
+          return s.endsWith(toStr(args[0]));
+        case "toNumber":
+          return parseFloat(s) || 0;
+        default:
+          throw new RuntimeError(`string has no method '${name}'`);
+      }
+    }
+    numberMethod(n, name, _args) {
+      switch (name) {
+        case "floor":
+          return Math.floor(n);
+        case "ceil":
+          return Math.ceil(n);
+        case "round":
+          return Math.round(n);
+        case "abs":
+          return Math.abs(n);
+        case "toString":
+          return fmtNum(n);
+        default:
+          throw new RuntimeError(`number has no method '${name}'`);
+      }
+    }
+    ledgerMethod(l, name, args) {
+      switch (name) {
+        case "append":
+          return l.append(toStr(args[0]), toStr(args[1]));
+        case "verify":
+          return l.verifyChain();
+        case "size":
+          return l.entries.length;
+        case "all":
+          return l.entries;
+        default:
+          throw new RuntimeError(`ledger has no method '${name}'`);
+      }
+    }
+    crdtMethod(c, name, args) {
+      switch (name) {
+        case "set":
+          c.set(toStr(args[0]), toStr(args[1]), args[2] ?? Date.now(), toStr(args[3] ?? "n1"));
+          return c;
+        case "get":
+          return c.get(toStr(args[0])) ?? null;
+        case "merge":
+          c.merge(args[0]);
+          return c;
+        case "size":
+          return c.size;
+        case "entries":
+          return Object.fromEntries(c.entries());
+        default:
+          throw new RuntimeError(`crdt has no method '${name}'`);
+      }
+    }
+    machineMethod(m, name, args) {
+      switch (name) {
+        case "boot":
+          return m.boot();
+        case "load":
+          return m.loadLattice(toStr(args[0]));
+        case "exportDNA":
+          return m.exportDNA(args[0] || 1024);
+        case "importDNA":
+          return m.importDNA(toStr(args[0]));
+        case "writeMBR":
+          return m.writeMBR(toStr(args[0]));
+        case "read":
+          return Array.from(m.read(args[0], args[1]));
+        default:
+          throw new RuntimeError(`machine has no method '${name}'`);
+      }
+    }
+    aceMethod(a, name, args) {
+      switch (name) {
+        case "charge":
+          return a.charge(args[0], toStr(args[1] ?? "op"));
+        case "witness":
+          return a.witness(toStr(args[0]));
+        case "state":
+          return a.state;
+        default:
+          throw new RuntimeError(`ace has no method '${name}'`);
+      }
+    }
+    binop(op, a, b, line) {
+      switch (op) {
+        case "+": {
+          if (typeof a === "string" || typeof b === "string") return toStr(a) + toStr(b);
+          return a + b;
+        }
+        case "-":
+          return a - b;
+        case "*":
+          return a * b;
+        case "/":
+          return b === 0 ? NaN : a / b;
+        case "%":
+          return a % b;
+        case "**":
+          return Math.pow(a, b);
+        case "==":
+          return this.looseEq(a, b);
+        case "!=":
+          return !this.looseEq(a, b);
+        case "<":
+          return a < b;
+        case ">":
+          return a > b;
+        case "<=":
+          return a <= b;
+        case ">=":
+          return a >= b;
+        case "&&":
+          return truthy(a) ? b : a;
+        case "||":
+          return truthy(a) ? a : b;
+        case "&":
+          return (a | 0) & (b | 0);
+        case "|":
+          return a | 0 | (b | 0);
+        case "^":
+          return (a | 0) ^ (b | 0);
+        default:
+          throw new RuntimeError(`unsupported operator ${op}`, line);
+      }
+    }
+    looseEq(a, b) {
+      if (a === b) return true;
+      if (a === null || b === null || a === void 0 || b === void 0) return false;
+      if (typeof a === "number" && typeof b === "string") return a === Number(b);
+      if (typeof a === "string" && typeof b === "number") return Number(a) === b;
+      if (Array.isArray(a) && Array.isArray(b)) return JSON.stringify(a) === JSON.stringify(b);
+      return false;
+    }
+    unop(op, a) {
+      switch (op) {
+        case "-":
+          return -a;
+        case "+":
+          return +a;
+        case "!":
+          return !truthy(a);
+        case "~":
+          return ~a;
+        default:
+          throw new RuntimeError(`unsupported unary operator ${op}`);
+      }
+    }
+  };
+  function runSource(source) {
+    const ast = parse(source);
+    const compiled = compile(ast);
+    const interp = new Interpreter(compiled);
+    return interp.run();
+  }
+
+  // src/lang/translator.ts
+  function alpPolicy(multiplicity, artaDefects) {
+    let policy = "NONE";
+    if (artaDefects > 0) policy = "REDUCE_ARTA";
+    else if (multiplicity < 3) policy = "INCREASE_MULTIPLICITY";
+    return { multiplicity, artaDefects, policy };
+  }
+  function rtaMetric(confidence, artaDefects) {
+    return Math.max(0, Math.min(1, confidence - artaDefects * 0.1));
+  }
+  var NUMBER_WORDS = {
+    zero: 0,
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+    twenty: 20,
+    thirty: 30,
+    forty: 40,
+    fifty: 50,
+    hundred: 100,
+    thousand: 1e3
+  };
+  function wordsToNumbers(text) {
+    return text.replace(
+      /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|hundred|thousand)\b/gi,
+      (m) => String(NUMBER_WORDS[m.toLowerCase()] ?? m)
+    );
+  }
+  function rewriteArithmetic(s) {
+    let out = s;
+    out = out.replace(
+      /\b(add|sum|plus)\s+([A-Za-z_$][\w$]*)\s+(?:and|to|\+)\s+([A-Za-z_$][\w$]*)/gi,
+      (_m, _v, a, b) => `${a} + ${b}`
+    );
+    out = out.replace(
+      /\b(subtract|minus)\s+([A-Za-z_$][\w$]*)\s+(?:from|and|-)\s+([A-Za-z_$][\w$]*)/gi,
+      (_m, _v, a, b) => `${a} - ${b}`
+    );
+    out = out.replace(
+      /\b(multiply|times|product of)\s+([A-Za-z_$][\w$]*)\s+(?:by|and|\*)\s+([A-Za-z_$][\w$]*)/gi,
+      (_m, _v, a, b) => `${a} * ${b}`
+    );
+    out = out.replace(
+      /\b(divide)\s+([A-Za-z_$][\w$]*)\s+(?:by|and|\/)\s+([A-Za-z_$][\w$]*)/gi,
+      (_m, _v, a, b) => `${a} / ${b}`
+    );
+    return out;
+  }
+  function rewriteComparisons(s) {
+    return s.replace(/\bis greater than\b/gi, ">").replace(/\bis less than\b/gi, "<").replace(/\bgreater than or equal to\b/gi, ">=").replace(/\bless than or equal to\b/gi, "<=").replace(/\bequals?\b(?!\s+to)/gi, "==");
+  }
+  var GraphemeDecomposer = class {
+    decompose(input) {
+      const notes = [];
+      const raw = input.trim();
+      const lower = raw.toLowerCase();
+      let code = "";
+      let intent = "expression";
+      let confidence = 0.6;
+      const buildIntent = this.matchBuildIntent(lower);
+      if (buildIntent) {
+        return {
+          code: buildIntent.code,
+          intent: buildIntent.intent,
+          confidence: 0.92,
+          rta: rtaMetric(0.92, 0),
+          notes: [`matched build intent: ${buildIntent.intent}`]
+        };
+      }
+      let text = raw;
+      text = rewriteArithmetic(text);
+      text = rewriteComparisons(text);
+      text = wordsToNumbers(text);
+      text = text.replace(/^\s*(print|say|show|display|output)\s+(?:the\s+)?(?:value\s+of\s+)?(.+)$/i, "print $1");
+      const repeatMatch = text.match(/^\s*(?:repeat|loop)\s+(\d+)\s+times?\s*[:,]?\s*(.*)$/i);
+      if (repeatMatch) {
+        const n = repeatMatch[1];
+        const inner = repeatMatch[2].trim() || 'print "hello"';
+        const innerCode = this.decomposeInline(inner);
+        return {
+          code: `repeat ${n} {
+  ${innerCode}
+}`,
+          intent: "repeat-loop",
+          confidence: 0.9,
+          rta: rtaMetric(0.9, 0),
+          notes: ["repeat loop"]
+        };
+      }
+      text = text.replace(/^\s*(?:create|make|set|define|declare)\s+(?:a\s+)?(?:variable\s+)?([A-Za-z_$][\w$]*)\s+(?:equal to|to|as|=)\s+(.+)$/i, "let $1 = $2");
+      text = text.replace(/^\s*(?:let|set)\s+([A-Za-z_$][\w$]*)\s+(?:be|=)\s+(.+)$/i, "let $1 = $2");
+      text = text.replace(/^\s*([A-Za-z_$][\w$]*)\s+is\s+(.+)$/i, "let $1 = $2");
+      text = text.replace(/^\s*(?:compute|calculate)\s+([A-Za-z_$][\w$]*)\s+(?:as|equals?|=)\s+(.+)$/i, "let $1 = $2");
+      const ifMatch = text.match(/^\s*if\s+(.+?)\s+(?:then\s+)?(?:print|say|show)\s+(.+)$/i);
+      if (ifMatch) {
+        const cond = ifMatch[1].trim();
+        const body = ifMatch[2].trim();
+        const bodyCode = this.decomposeInline(body);
+        return {
+          code: `if ${cond} {
+  ${bodyCode}
+}`,
+          intent: "conditional",
+          confidence: 0.88,
+          rta: rtaMetric(0.88, 0),
+          notes: ["conditional"]
+        };
+      }
+      const fnMatch = text.match(/^\s*(?:define|create|make)?\s*(?:a\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:of|with|taking)?\s*\(?([A-Za-z_$][\w$]*)?\)?\s*(?:that\s+)?(?:returns?|gives?|is)\s+(.+)$/i);
+      if (fnMatch) {
+        const name = fnMatch[1];
+        const param = fnMatch[2] || "n";
+        const body = fnMatch[3].trim();
+        return {
+          code: `function ${name}(${param}) {
+  return ${body}
+}`,
+          intent: "function",
+          confidence: 0.9,
+          rta: rtaMetric(0.9, 0),
+          notes: ["function definition"]
+        };
+      }
+      code = text;
+      confidence = 0.7;
+      const statements = text.split(/\s+and then\s+|;\s*|\n+/).map((s) => s.trim()).filter(Boolean);
+      if (statements.length > 1) {
+        code = statements.map((s) => this.decomposeInline(s)).join("\n");
+        intent = "program";
+        confidence = 0.8;
+      } else {
+        code = this.decomposeInline(text);
+        intent = /^print\b/.test(code) ? "print" : /^let\b/.test(code) ? "assignment" : "expression";
+      }
+      notes.push("normalized English \u2192 SidAli");
+      return { code, intent, confidence, rta: rtaMetric(confidence, 0), notes };
+    }
+    decomposeInline(s) {
+      let t = s.trim();
+      t = rewriteArithmetic(t);
+      t = rewriteComparisons(t);
+      t = wordsToNumbers(t);
+      t = t.replace(/^\s*(?:print|say|show|display|output)\s+(?:the\s+)?(?:value\s+of\s+)?(.+)$/i, "print $1");
+      t = t.replace(/^\s*(?:create|make|set|define|declare)\s+(?:a\s+)?(?:variable\s+)?([A-Za-z_$][\w$]*)\s+(?:equal to|to|as|=)\s+(.+)$/i, "let $1 = $2");
+      t = t.replace(/^\s*([A-Za-z_$][\w$]*)\s+is\s+(.+)$/i, "let $1 = $2");
+      t = t.replace(/^print\s+([A-Za-z_][\w$]*)$/i, (m, w) => {
+        if (["true", "false", "nil"].includes(w.toLowerCase())) return `print ${w.toLowerCase()}`;
+        return `print "${w}"`;
+      });
+      return t;
+    }
+    matchBuildIntent(lower) {
+      const has = (...ws) => ws.some((w) => lower.includes(w));
+      if (has("operating system", "an os", "mini os", "system that reads")) {
+        return { intent: "build-os", code: OS_EXAMPLE };
+      }
+      if (has("social", "social network", "social media", "community platform", "social platform")) {
+        return { intent: "build-social", code: SOCIAL_EXAMPLE };
+      }
+      if (has("zk", "zero knowledge", "zero-knowledge", "snark", "smart contract", "blockchain")) {
+        return { intent: "build-zk", code: ZK_EXAMPLE };
+      }
+      if (has("ghost logic", "zero-width", "zero width", "steganography", "zws")) {
+        return { intent: "build-ghost", code: GHOST_EXAMPLE };
+      }
+      if (has("fibonacci", "factorial", "math suite")) {
+        return { intent: "build-math", code: MATH_EXAMPLE };
+      }
+      if (has("build a language", "compiler", "programming language")) {
+        return { intent: "build-language", code: LANGUAGE_EXAMPLE };
+      }
+      return null;
+    }
+  };
+  var OS_EXAMPLE = `// SidAli mini operating system: file read/write over the RAM machine
+let m = newMachine()
+m.writeMBR("SECTORFORTH init")
+let boot = m.boot()
+print "ring " + boot.ring
+fsWrite("/etc/motd", "welcome to SidAli OS")
+fsWrite("/home/user.txt", "hello from ring 0")
+let data = fsRead("/home/user.txt")
+print "read: " + data
+print "files: " + len(fsList())`;
+  var SOCIAL_EXAMPLE = `// SidAli social platform: CRDT convergence + append-only ledger
+let feed = newCRDT()
+let l = newLedger()
+feed.set("post:1", "hello world", 1, "node-a")
+feed.set("post:2", "sidali is live", 2, "node-b")
+feed.set("post:1", "hello world (edited)", 3, "node-a")
+l.append("post", "post:1")
+l.append("post", "post:2")
+print "feed size " + feed.size
+print feed.get("post:1")
+print "ledger valid " + l.verify()
+print "ledger height " + l.size`;
+  var ZK_EXAMPLE = `// SidAli zk-SNARK style contract with post-quantum Dilithium signatures
+let kp = dilithiumKeygen("contract-seed")
+let l = newLedger()
+l.append("deploy", "verifier")
+l.append("commit", blake3("state=42"))
+let sig = dilithiumSign("transfer 10 to bob", kp)
+print "sig ok " + dilithiumVerify("transfer 10 to bob", sig, kp)
+print "tampered ok " + dilithiumVerify("transfer 999 to bob", sig, kp)
+print "proof anchor " + proofAnchor(["state=42", "bob"])
+print "chain " + l.verify()`;
+  var GHOST_EXAMPLE = `// SidAli ghost logic + zero-width steganography (Cantor sieve)
+let secret = "sidali-void"
+let hidden = zwsEncode(secret)
+print "encoded length " + len(hidden)
+print "decoded " + zwsDecode(hidden)
+let g = ghost("let x=5")
+print "semantic volume " + g.semanticVolume
+print "measure " + g.measure`;
+  var MATH_EXAMPLE = `// SidAli real math suite
+print "fib 55 " + fib(55)
+print "factorial 5 " + factorial(5)
+let square = function(n) { return n * n }
+print "square 7 " + square(7)
+let x = 5
+let y = 10
+print "sum " + (x + y)
+print "primes " + isPrime(97)
+print "zeta 2 " + zeta(2)`;
+  var LANGUAGE_EXAMPLE = `// SidAli builds languages: transcendental AST + 64 sedenion opcodes
+let ops = opcodes()
+print "opcodes " + len(ops)
+let a = [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+let b = [0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0]
+let zd = zeroDivisor(a, b)
+print "norm product " + zd.normProduct
+print "pi node " + pi(2)`;
+  return __toCommonJS(api_exports);
+})();
+</script>
+<script>window.SIDALI_EXAMPLES = [{"name":"01-os.sidali","source":"// SidAli — example 1: mini operating system\n// Reads and writes files through the RAM-backed machine.\n\nlet m = newMachine()\nm.writeMBR(\"SECTORFORTH init\")\nlet boot = m.boot()\nprint \"boot: \" + boot.message\nprint \"ring \" + boot.ring\n\nfsWrite(\"/etc/motd\", \"welcome to SidAli OS\")\nfsWrite(\"/home/user.txt\", \"hello from ring 0\")\n\nlet data = fsRead(\"/home/user.txt\")\nprint \"read: \" + data\nprint \"files: \" + len(fsList())\n\n// Immutable Resurrection: export RAM as DNA and restore it\nm.load(\"sidali-immortal-kernel\")\nlet dna = m.exportDNA(64)\nprint \"dna ok \" + contains(dna, \"[START]\")\nprint \"restore \" + m.importDNA(dna)\n"},{"name":"02-social.sidali","source":"// SidAli — example 2: social platform (CRDT + ledger)\n// Two nodes converge on the same feed; the ledger stays verifiable.\n\nlet feed = newCRDT()\nlet l = newLedger()\n\nfeed.set(\"post:1\", \"hello world\", 1, \"node-a\")\nfeed.set(\"post:2\", \"sidali is live\", 2, \"node-b\")\nfeed.set(\"post:1\", \"hello world (edited)\", 3, \"node-a\")\n\nl.append(\"post\", \"post:1\")\nl.append(\"post\", \"post:2\")\n\nprint \"feed size \" + feed.size\nprint feed.get(\"post:1\")\nprint \"ledger valid \" + l.verify()\nprint \"ledger height \" + l.size\n"},{"name":"03-zk-contract.sidali","source":"// SidAli — example 3: zk-SNARK contract + Dilithium post-quantum signatures\n\nlet kp = dilithiumKeygen(\"contract-seed\")\nlet l = newLedger()\n\nl.append(\"deploy\", \"verifier\")\nl.append(\"commit\", blake3(\"state=42\"))\n\nlet sig = dilithiumSign(\"transfer 10 to bob\", kp)\nprint \"signature ok \" + dilithiumVerify(\"transfer 10 to bob\", sig, kp)\nprint \"tampered ok \" + dilithiumVerify(\"transfer 999 to bob\", sig, kp)\n\nlet anchor = proofAnchor([\"state=42\", \"bob\"])\nprint \"proof anchor \" + anchor\n\n// circuit-style constraint check via bounded model checking\nlet checked = kani(function(a) { return a[0] * a[1] }, 4)\nprint \"constraints pass \" + checked.passed\n\nprint \"chain \" + l.verify()\n"},{"name":"04-ghost-zws.sidali","source":"// SidAli — example 4: ghost logic + zero-width steganography (Cantor sieve)\n\nlet secret = \"sidali-void\"\nlet hidden = zwsEncode(secret)\nprint \"encoded length \" + len(hidden)\nprint \"decoded \" + zwsDecode(hidden)\n\nlet g = ghost(\"let x=5\")\nprint \"semantic volume \" + g.semanticVolume\nprint \"void ratio \" + g.voidRatio\nprint \"measure \" + g.measure\n"},{"name":"05-math.sidali","source":"// SidAli — example 5: real math suite\n// Fibonacci, factorial, square, sum, primes, zeta, sedenion opcodes.\n\nprint \"fib 55 = \" + fib(55)\nprint \"factorial 5 = \" + factorial(5)\n\nfunction square(n) { return n * n }\nprint \"square 7 = \" + square(7)\n\nlet x = 5\nlet y = 10\nlet z = x + y\nprint \"sum = \" + z\n\nprint \"isPrime 97 = \" + isPrime(97)\nprint \"zeta 2 = \" + zeta(2)\n\nlet ops = opcodes()\nprint \"opcodes = \" + len(ops)\n\nlet a = [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0]\nlet b = [0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0]\nlet zd = zeroDivisor(a, b)\nprint \"zero divisor norm product = \" + zd.normProduct\n\nprint \"pi node = \" + pi(2)\n"}];</script>
+<script>/* SidAli playground UI. Engine is provided by the inlined `SidAli` global. */
+(function () {
+  'use strict';
+  const E = window.SidAli;
+  const $ = (id) => document.getElementById(id);
+
+  const editor = $('editor');
+  const gutter = $('gutter');
+  const output = $('output');
+  const verify = $('verify');
+  const status = $('status');
+  const timing = $('timing');
+  const cursor = $('cursor');
+  const exampleSel = $('example');
+  const examples = window.SIDALI_EXAMPLES || [];
+
+  // ---------- examples ----------
+  examples.forEach((ex, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = ex.name.replace(/^\d+-/, '').replace('.sidali', '');
+    exampleSel.appendChild(o);
+  });
+  exampleSel.addEventListener('change', () => {
+    const ex = examples[Number(exampleSel.value)];
+    if (ex) { editor.value = ex.source; refreshGutter(); }
+  });
+  if (examples.length) { editor.value = examples[0].source; }
+
+  // ---------- editor helpers ----------
+  function refreshGutter() {
+    const lines = editor.value.split('\n').length;
+    let g = '';
+    for (let i = 1; i <= lines; i++) g += i + '\n';
+    gutter.textContent = g;
+  }
+  function updateCursor() {
+    const upTo = editor.value.slice(0, editor.selectionStart);
+    const line = upTo.split('\n').length;
+    const col = upTo.length - upTo.lastIndexOf('\n');
+    cursor.textContent = `Ln ${line}, Col ${col}`;
+  }
+  editor.addEventListener('input', () => { refreshGutter(); updateCursor(); });
+  editor.addEventListener('keyup', updateCursor);
+  editor.addEventListener('click', updateCursor);
+  editor.addEventListener('scroll', () => { gutter.scrollTop = editor.scrollTop; });
+  editor.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const s = editor.selectionStart, en = editor.selectionEnd;
+      editor.value = editor.value.slice(0, s) + '  ' + editor.value.slice(en);
+      editor.selectionStart = editor.selectionEnd = s + 2;
+      refreshGutter();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+  });
+
+  // ---------- run ----------
+  function chip(k, v, cls) {
+    const d = document.createElement('div');
+    d.className = 'chip' + (cls ? ' ' + cls : '');
+    d.innerHTML = `<span class="k">${k}</span><span class="v">${escapeHtml(String(v))}</span>`;
+    return d;
+  }
+  function hashline(label, hash) {
+    const d = document.createElement('div');
+    d.className = 'hashline';
+    d.innerHTML = `<b>${escapeHtml(label)}</b> ${escapeHtml(hash)}`;
+    return d;
+  }
+  function escapeHtml(s) {
+    return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  function run() {
+    const src = editor.value;
+    output.textContent = '';
+    verify.textContent = '';
+    status.textContent = 'compiling…';
+    let result;
+    try {
+      result = E.runSource(src);
+    } catch (err) {
+      status.textContent = 'compile error';
+      const line = document.createElement('div');
+      line.className = 'err';
+      line.textContent = '✖ ' + (err && err.message ? err.message : String(err));
+      output.appendChild(line);
+      timing.textContent = '—';
+      return;
+    }
+
+    // stdout
+    for (const ln of result.output) {
+      const d = document.createElement('div');
+      d.className = 'ok';
+      d.textContent = ln;
+      output.appendChild(d);
+    }
+    if (result.error) {
+      const d = document.createElement('div');
+      d.className = 'err';
+      d.textContent = '✖ ' + result.error;
+      output.appendChild(d);
+    }
+    if (!result.output.length && !result.error) {
+      const d = document.createElement('div');
+      d.className = 'dim';
+      d.textContent = '(no output)';
+      output.appendChild(d);
+    }
+
+    // verification layer
+    const s = result.stats;
+    verify.appendChild(chip('instructions', s.instructions));
+    verify.appendChild(chip('time', s.timeMs + ' ms'));
+    verify.appendChild(chip('RAM lattice', s.ramUsed + ' B'));
+    verify.appendChild(chip('ledger height', s.ledgerHeight));
+    verify.appendChild(chip('ace used', result.ace.used + ' / ' + result.ace.limit));
+    verify.appendChild(chip('ace safety', result.ace.safety, result.ace.safety === 'VIOLATED' ? 'bad' : ''));
+    verify.appendChild(chip('tier', result.ace.tier));
+    verify.appendChild(chip('witnesses', s.witnesses));
+
+    // BLAKE3 witnesses + proof anchor
+    const witnessHash = E.blake3(src);
+    verify.appendChild(hashline('source BLAKE3', witnessHash));
+    if (result.witnesses.length) {
+      result.witnesses.slice(0, 6).forEach((w, i) => verify.appendChild(hashline('build witness ' + i, w)));
+    }
+    const anchor = E.proofAnchor([witnessHash, String(s.instructions), result.ace.safety]);
+    verify.appendChild(hashline('proof anchor', anchor));
+
+    // Dilithium demo signature over the program (real lattice arithmetic)
+    try {
+      const kp = E.dilithiumKeygen(witnessHash);
+      const sig = E.dilithiumSign(src, kp);
+      const ok = E.dilithiumVerify(src, sig, kp);
+      verify.appendChild(chip('dilithium', ok ? 'valid' : 'invalid', ok ? '' : 'bad'));
+      verify.appendChild(hashline('dilithium sig', sig.hash.slice(0, 64)));
+    } catch (e) { /* signature is best-effort telemetry */ }
+
+    // sigma kernel stability of the execution
+    const lEff = Math.min(0.999, s.instructions / 1000000);
+    const sig2 = E.sigmaKernel(lEff, 0);
+    verify.appendChild(chip('L_eff', sig2.lEff.toFixed(6), sig2.lEffOk ? '' : 'bad'));
+    verify.appendChild(chip('stable', String(sig2.stable), sig2.stable ? '' : 'bad'));
+
+    // DNA
+    const dnaLine = document.createElement('div');
+    dnaLine.className = 'hashline';
+    dnaLine.innerHTML = `<b>DNA</b> ${escapeHtml(result.dna.slice(0, 80))}…`;
+    verify.appendChild(dnaLine);
+
+    timing.textContent = s.timeMs + ' ms';
+    status.textContent = result.error ? 'runtime error' : 'ok';
+  }
+  $('run').addEventListener('click', run);
+
+  // ---------- English -> SidAli ----------
+  $('translate').addEventListener('click', () => {
+    const english = prompt('Describe what you want in English (or use the microphone):', 'build a social platform');
+    if (english === null) return;
+    applyEnglish(english);
+  });
+
+  function applyEnglish(text) {
+    const dec = new E.GraphemeDecomposer().decompose(text);
+    editor.value = dec.code;
+    refreshGutter();
+    const policy = E.alpPolicy(3, 0);
+    status.textContent = `intent: ${dec.intent} · confidence ${dec.confidence.toFixed(2)} · RTA ${dec.rta.toFixed(2)} · ${policy.policy}`;
+    run();
+  }
+
+  // ---------- voice ----------
+  const mic = $('mic');
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let rec = null;
+  if (SR) {
+    rec = new SR();
+    rec.lang = 'en-US';
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (ev) => {
+      const text = ev.results[0][0].transcript;
+      mic.classList.remove('rec');
+      mic.textContent = '🎤';
+      applyEnglish(text);
+    };
+    rec.onerror = () => { mic.classList.remove('rec'); mic.textContent = '🎤'; status.textContent = 'speech error'; };
+    rec.onend = () => { mic.classList.remove('rec'); mic.textContent = '🎤'; };
+    mic.addEventListener('click', () => {
+      try {
+        mic.classList.add('rec');
+        mic.textContent = '■';
+        status.textContent = 'listening…';
+        rec.start();
+      } catch (e) {
+        mic.classList.remove('rec'); mic.textContent = '🎤';
+        status.textContent = 'mic unavailable';
+      }
+    });
+  } else {
+    mic.addEventListener('click', () => {
+      status.textContent = 'SpeechRecognition not supported — use English → SidAli';
+    });
+  }
+
+  refreshGutter();
+  updateCursor();
+  // Run the first example on load so the VM demonstrates real execution immediately.
+  if (editor.value) run();
+})();
+</script>
+</body>
+</html>

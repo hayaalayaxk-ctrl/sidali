@@ -1,0 +1,17 @@
+// SidAli — example 2: social platform (CRDT + ledger)
+// Two nodes converge on the same feed; the ledger stays verifiable.
+
+let feed = newCRDT()
+let l = newLedger()
+
+feed.set("post:1", "hello world", 1, "node-a")
+feed.set("post:2", "sidali is live", 2, "node-b")
+feed.set("post:1", "hello world (edited)", 3, "node-a")
+
+l.append("post", "post:1")
+l.append("post", "post:2")
+
+print "feed size " + feed.size
+print feed.get("post:1")
+print "ledger valid " + l.verify()
+print "ledger height " + l.size

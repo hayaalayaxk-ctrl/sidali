@@ -1,0 +1,20 @@
+// SidAli — example 3: zk-SNARK contract + Dilithium post-quantum signatures
+
+let kp = dilithiumKeygen("contract-seed")
+let l = newLedger()
+
+l.append("deploy", "verifier")
+l.append("commit", blake3("state=42"))
+
+let sig = dilithiumSign("transfer 10 to bob", kp)
+print "signature ok " + dilithiumVerify("transfer 10 to bob", sig, kp)
+print "tampered ok " + dilithiumVerify("transfer 999 to bob", sig, kp)
+
+let anchor = proofAnchor(["state=42", "bob"])
+print "proof anchor " + anchor
+
+// circuit-style constraint check via bounded model checking
+let checked = kani(function(a) { return a[0] * a[1] }, 4)
+print "constraints pass " + checked.passed
+
+print "chain " + l.verify()

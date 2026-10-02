@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+<title>SidAli — compiler + VM</title>
+<style>/*__STYLE__*/</style>
+</head>
+<body>
+<header class="bar">
+  <div class="brand"><span class="dot"></span> SidAli <span class="ver">compiler + VM</span></div>
+  <div class="bar-actions">
+    <select id="example" title="Load example"></select>
+    <button id="translate" class="ghost">English → SidAli</button>
+    <button id="mic" class="ghost" title="Voice to code">🎤</button>
+    <button id="run" class="primary">▶ Run</button>
+  </div>
+</header>
+
+<main class="workspace">
+  <section class="pane editor-pane">
+    <div class="pane-head">
+      <span class="file">main.sidali</span>
+      <span id="cursor" class="muted">Ln 1, Col 1</span>
+    </div>
+    <div class="editor-wrap">
+      <div id="gutter" class="gutter" aria-hidden="true"></div>
+      <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+    </div>
+    <div class="pane-foot">
+      <span id="status" class="muted">ready</span>
+    </div>
+  </section>
+
+  <section class="pane output-pane">
+    <div class="pane-head">
+      <span class="file">stdout</span>
+      <span id="timing" class="muted">—</span>
+    </div>
+    <pre id="output" class="output"></pre>
+    <div class="pane-head sub">
+      <span class="file">verification layer</span>
+    </div>
+    <div id="verify" class="verify"></div>
+  </section>
+</main>
+
+<script>/*__ENGINE__*/</script>
+<script>window.SIDALI_EXAMPLES = /*__EXAMPLES__*/;</script>
+<script>/*__APP__*/</script>
+</body>
+</html>

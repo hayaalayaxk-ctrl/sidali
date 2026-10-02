@@ -1,0 +1,11 @@
+// SidAli — example 4: ghost logic + zero-width steganography (Cantor sieve)
+
+let secret = "sidali-void"
+let hidden = zwsEncode(secret)
+print "encoded length " + len(hidden)
+print "decoded " + zwsDecode(hidden)
+
+let g = ghost("let x=5")
+print "semantic volume " + g.semanticVolume
+print "void ratio " + g.voidRatio
+print "measure " + g.measure
