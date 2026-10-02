@@ -12,7 +12,19 @@
   const timing = $('timing');
   const cursor = $('cursor');
   const exampleSel = $('example');
+  const substrateSel = $('substrate');
   const examples = window.SIDALI_EXAMPLES || [];
+
+  // ---------- substrates ----------
+  // The same SAIR runs on every medium; only the energy model changes.
+  const SUBSTRATES = E.SUBSTRATE_ENERGY ? Object.keys(E.SUBSTRATE_ENERGY) : ['electron'];
+  SUBSTRATES.forEach((s) => {
+    const o = document.createElement('option');
+    o.value = s;
+    o.textContent = s;
+    substrateSel.appendChild(o);
+  });
+  const currentSubstrate = () => (E.makeSubstrate ? E.makeSubstrate(substrateSel.value) : null);
 
   // ---------- examples ----------
   examples.forEach((ex, i) => {
@@ -150,6 +162,21 @@
     dnaLine.className = 'hashline';
     dnaLine.innerHTML = `<b>DNA</b> ${escapeHtml(result.dna.slice(0, 80))}…`;
     verify.appendChild(dnaLine);
+
+    // SAIR: the physics-free IR and its energy on the selected substrate
+    if (E.lowerBytecode && E.compile && E.parse && E.evaluate) {
+      try {
+        const ir = E.lowerBytecode(E.compile(E.parse(src)), src);
+        verify.appendChild(chip('SAIR states', ir.meta.states));
+        verify.appendChild(chip('SAIR transitions', ir.meta.transitions));
+        const sub = currentSubstrate();
+        if (sub) {
+          const ev = E.evaluate(ir, sub);
+          verify.appendChild(chip('substrate', sub.name));
+          verify.appendChild(chip('energy', ev.energy));
+        }
+      } catch (e) { /* SAIR is diagnostic telemetry; never block a run */ }
+    }
 
     timing.textContent = s.timeMs + ' ms';
     status.textContent = result.error ? 'runtime error' : 'ok';
