@@ -80,3 +80,14 @@ npm run sidac -- build hello.sidali --target=wasm32 --emit=obj
   9 substrates.
 - `src/vm/api.ts` exports the IR + backend surface.
 - Tests: 59 (added `test/sair.test.mjs`). Typecheck clean.
+
+## STEP 2 Phase 2 — real HAL
+
+- `src/hal/hal.ts` — per-substrate device maps (`HAL_SPECS`): uart, optical
+  modulator, qubit gate, fluidic valve, vacuum field emitter, holographic voxel,
+  plasma arc, energy transducer. `halRuntimeC(substrate)` generates the freestanding
+  C runtime; `halAddressMap` exposes registers for tooling.
+- `src/compiler/native.ts` uses the generated per-substrate HAL instead of one
+  embedded UART string, so the same program drives different hardware.
+- Tests: 63 (added `test/hal.test.mjs`, real cross-compiles for photon/qubit/
+  fluidic/vacuum/plasma/energy). Typecheck clean.

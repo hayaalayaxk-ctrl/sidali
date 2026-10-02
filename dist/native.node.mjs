@@ -2745,6 +2745,112 @@ function findDna(image) {
   return readDnaHeader(image) || readDnaTrailer(image);
 }
 
+// src/hal/hal.ts
+var HAL_SPECS = {
+  electron: {
+    substrate: "electron",
+    console: "uart",
+    devices: [{ name: "uart", base: 1073811456, dataOffset: 4, statusOffset: 0, readyBit: 7, unit: "byte" }]
+  },
+  photon: {
+    substrate: "photon",
+    console: "modulator",
+    devices: [{ name: "modulator", base: 1342308352, dataOffset: 8, statusOffset: 0, readyBit: 1, unit: "pulse" }]
+  },
+  qubit: {
+    substrate: "qubit",
+    console: "gate",
+    devices: [{ name: "gate", base: 1610612736, dataOffset: 4, statusOffset: 0, readyBit: 2, unit: "gate-op" }]
+  },
+  fluidic: {
+    substrate: "fluidic",
+    console: "valve",
+    devices: [{ name: "valve", base: 1879048192, dataOffset: 0, unit: "drop" }]
+  },
+  vacuum: {
+    substrate: "vacuum",
+    console: "emitter",
+    devices: [{ name: "emitter", base: 2147483648, dataOffset: 4, statusOffset: 0, readyBit: 0, unit: "field-pulse" }]
+  },
+  holographic: {
+    substrate: "holographic",
+    console: "voxel",
+    devices: [{ name: "voxel", base: 2415919104, dataOffset: 12, unit: "voxel" }]
+  },
+  plasma: {
+    substrate: "plasma",
+    console: "arc",
+    devices: [{ name: "arc", base: 2684354560, dataOffset: 8, statusOffset: 0, readyBit: 3, unit: "arc-pulse" }]
+  },
+  energy: {
+    substrate: "energy",
+    console: "transducer",
+    devices: [{ name: "transducer", base: 2952790016, dataOffset: 0, unit: "joule-step" }]
+  },
+  generic: {
+    substrate: "generic",
+    console: "uart",
+    devices: [{ name: "uart", base: 1073811456, dataOffset: 4, statusOffset: 0, readyBit: 7, unit: "byte" }]
+  }
+};
+function halSpec(substrate) {
+  return HAL_SPECS[substrate] || HAL_SPECS.generic;
+}
+function halRuntimeC(substrate) {
+  const spec = halSpec(substrate);
+  const dev = spec.devices[0];
+  const ready = dev.statusOffset !== void 0 ? `  while (!((*status) & (1u << ${dev.readyBit ?? 0}))) { }
+` : "";
+  const statusDecl = dev.statusOffset !== void 0 ? `  volatile unsigned int *status = (volatile unsigned int *)(SID_DEVICE_BASE + 0x${dev.statusOffset.toString(16)});
+` : "";
+  return `/* SidAli HAL runtime \u2014 substrate: ${spec.substrate} (console: ${spec.console}, unit: ${dev.unit}). */
+typedef unsigned long long sid_u64;
+
+#ifndef SID_DEVICE_BASE
+#define SID_DEVICE_BASE 0x${dev.base.toString(16)}UL
+#endif
+
+/* ${spec.console}: data register at +0x${dev.dataOffset.toString(16)}${dev.statusOffset !== void 0 ? `, status at +0x${dev.statusOffset.toString(16)} (ready = bit ${dev.readyBit ?? 0})` : ""} */
+static inline void sid_device_write(unsigned char c) {
+${statusDecl}  volatile unsigned int *data = (volatile unsigned int *)(SID_DEVICE_BASE + 0x${dev.dataOffset.toString(16)});
+${ready}  *data = (unsigned int)c;
+}
+
+void sid_write(const char *s, sid_u64 len) {
+  if (!s) return;
+  if (len == 0) {
+    for (const char *p = s; *p; p++) sid_device_write((unsigned char)*p);
+  } else {
+    for (sid_u64 i = 0; i + 1 < len; i++) sid_device_write((unsigned char)s[i]);
+  }
+}
+
+sid_u64 sid_read(void) { return (sid_u64)-1; }
+
+void sid_mmio_write(sid_u64 addr, sid_u64 val) {
+  *(volatile sid_u64 *)addr = val;
+}
+
+sid_u64 sid_mmio_read(sid_u64 addr) {
+  return *(volatile sid_u64 *)addr;
+}
+
+/* Substrate actuation: one ${dev.unit}. */
+void sid_emit(sid_u64 unit) {
+  *(volatile sid_u64 *)(SID_DEVICE_BASE + 0x${dev.dataOffset.toString(16)}) = unit;
+}
+`;
+}
+function halAddressMap(substrate) {
+  const spec = halSpec(substrate);
+  const out = [];
+  for (const d of spec.devices) {
+    out.push({ name: `${d.name}.data`, addr: d.base + d.dataOffset, kind: "data" });
+    if (d.statusOffset !== void 0) out.push({ name: `${d.name}.status`, addr: d.base + d.statusOffset, kind: "status" });
+  }
+  return out;
+}
+
 // src/compiler/native.ts
 var FAT_SUBSTRATES = [
   "x86_64-linux",
@@ -2771,39 +2877,6 @@ function clangPath() {
   }
   return "clang";
 }
-var HAL_RUNTIME_C = `/* SidAli HAL runtime \u2014 freestanding primitives the compiler lowers to. */
-typedef unsigned long long sid_u64;
-
-#ifndef SID_UART_BASE
-#define SID_UART_BASE 0x40011000UL
-#endif
-
-static inline void sid_uart_putc(unsigned char c) {
-  volatile unsigned int *sr = (volatile unsigned int *)(SID_UART_BASE + 0x00);
-  volatile unsigned int *dr = (volatile unsigned int *)(SID_UART_BASE + 0x04);
-  while (!((*sr) & (1u << 7))) { }
-  *dr = c;
-}
-
-void sid_write(const char *s, sid_u64 len) {
-  if (!s) return;
-  if (len == 0) {
-    for (const char *p = s; *p; p++) sid_uart_putc((unsigned char)*p);
-  } else {
-    for (sid_u64 i = 0; i + 1 < len; i++) sid_uart_putc((unsigned char)s[i]);
-  }
-}
-
-sid_u64 sid_read(void) { return (sid_u64)-1; }
-
-void sid_mmio_write(sid_u64 addr, sid_u64 val) {
-  *(volatile sid_u64 *)addr = val;
-}
-
-sid_u64 sid_mmio_read(sid_u64 addr) {
-  return *(volatile sid_u64 *)addr;
-}
-`;
 function buildNative(source, opts = {}) {
   const targetName = opts.target || "x86_64-linux";
   const target = TARGETS[targetName];
@@ -2848,7 +2921,7 @@ function buildNative(source, opts = {}) {
   } else if (target.freestanding) {
     args.push("-ffreestanding", "-nostdlib", "-fno-stack-protector", "-Wl,-e,_start");
     const halPath = join(outDir, `${outName}.hal.c`);
-    writeFileSync(halPath, HAL_RUNTIME_C);
+    writeFileSync(halPath, halRuntimeC(target.substrate || "electron"));
     args.push(halPath);
   }
   const res = spawnSync(clang, args, { encoding: "utf8" });
@@ -2922,6 +2995,7 @@ export {
   DNA_END,
   DNA_START,
   FAT_SUBSTRATES,
+  HAL_SPECS,
   SUBSTRATES,
   TARGETS,
   buildDnaHeader,
@@ -2930,6 +3004,9 @@ export {
   clangPath,
   findDna,
   formatDnaHeader,
+  halAddressMap,
+  halRuntimeC,
+  halSpec,
   readDnaHeader,
   readDnaTrailer,
   runNative,

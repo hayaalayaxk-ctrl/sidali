@@ -9,11 +9,14 @@ import { parse } from './parser';
 import { emitLlvm, TARGETS, TargetProfile, SUBSTRATES } from './llvm';
 import { buildDnaHeader, formatDnaHeader, withDnaHeader, readDnaHeader, verifyDna, DNA_END } from './dna';
 import { blake3Bytes, hex } from '../std/blake3';
+import { halRuntimeC } from '../hal/hal';
 
 export { TARGETS, SUBSTRATES };
 export type { TargetProfile, Substrate } from './llvm';
 export { withDnaHeader, readDnaHeader, readDnaTrailer, findDna, stripDna, verifyDna, buildDnaHeader, formatDnaHeader, DNA_START, DNA_END } from './dna';
 export type { DnaHeader } from './dna';
+export { HAL_SPECS, halSpec, halRuntimeC, halAddressMap } from '../hal/hal';
+export type { HalSpec, HalDevice } from '../hal/hal';
 
 /** Fat-binary components: one SidAli source, many substrates in one file. */
 export const FAT_SUBSTRATES = [
@@ -66,42 +69,6 @@ export function clangPath(): string {
   return 'clang';
 }
 
-// Bare-metal HAL, embedded so freestanding builds link without the source tree.
-// sid_u64 is 64-bit on every target to match the i64 in the emitted LLVM IR.
-const HAL_RUNTIME_C = `/* SidAli HAL runtime — freestanding primitives the compiler lowers to. */
-typedef unsigned long long sid_u64;
-
-#ifndef SID_UART_BASE
-#define SID_UART_BASE 0x40011000UL
-#endif
-
-static inline void sid_uart_putc(unsigned char c) {
-  volatile unsigned int *sr = (volatile unsigned int *)(SID_UART_BASE + 0x00);
-  volatile unsigned int *dr = (volatile unsigned int *)(SID_UART_BASE + 0x04);
-  while (!((*sr) & (1u << 7))) { }
-  *dr = c;
-}
-
-void sid_write(const char *s, sid_u64 len) {
-  if (!s) return;
-  if (len == 0) {
-    for (const char *p = s; *p; p++) sid_uart_putc((unsigned char)*p);
-  } else {
-    for (sid_u64 i = 0; i + 1 < len; i++) sid_uart_putc((unsigned char)s[i]);
-  }
-}
-
-sid_u64 sid_read(void) { return (sid_u64)-1; }
-
-void sid_mmio_write(sid_u64 addr, sid_u64 val) {
-  *(volatile sid_u64 *)addr = val;
-}
-
-sid_u64 sid_mmio_read(sid_u64 addr) {
-  return *(volatile sid_u64 *)addr;
-}
-`;
-
 export function buildNative(source: string, opts: BuildOptions = {}): BuildResult {
   const targetName = opts.target || 'x86_64-linux';
   const target = TARGETS[targetName];
@@ -152,10 +119,11 @@ export function buildNative(source: string, opts: BuildOptions = {}): BuildResul
     args.push('-c');
   } else if (target.freestanding) {
     args.push('-ffreestanding', '-nostdlib', '-fno-stack-protector', '-Wl,-e,_start');
-    // The bare-metal HAL provides sid_write / sid_mmio_write / UART. It is
-    // embedded here so the compiler works from a bundled CLI with no source tree.
+    // The bare-metal HAL provides sid_write / sid_mmio_write / the substrate's
+    // device. It is generated per substrate so the same program drives a UART,
+    // an optical modulator, a qubit gate, a valve, … without changing the source.
     const halPath = join(outDir, `${outName}.hal.c`);
-    writeFileSync(halPath, HAL_RUNTIME_C);
+    writeFileSync(halPath, halRuntimeC(target.substrate || 'electron'));
     args.push(halPath);
   }
 
