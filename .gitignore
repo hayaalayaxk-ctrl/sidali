@@ -3,3 +3,5 @@ dist/
 dist-site/
 *.log
 .DS_Store
+dist-native/
+.sidali-build/

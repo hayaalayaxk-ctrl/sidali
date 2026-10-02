@@ -16,8 +16,26 @@ No `eval` is used anywhere. Everything below actually computes.
 npm install
 npm run build   # produces a single self-contained index.html (engine inlined)
 npm run dev     # serves it at http://localhost:12000
-npm test        # 29 tests: arithmetic, control flow, classes, crypto, algebra
+npm test        # 47 tests: arithmetic, control flow, classes, crypto, algebra, native
 ```
+
+## Native compilation
+
+SidAli is not only a VM language. `src/compiler/llvm.ts` lowers the AST to real
+LLVM IR, which `clang` turns into native machine code. The `sidac` driver wraps
+the whole pipeline:
+
+```bash
+npm run sidac -- run examples/05-math.sidali          # JIT on the stack VM
+npm run sidac -- build hello.sidali                   # -> native x86_64 executable
+npm run sidac -- build hello.sidali --target=wasm32 --emit=obj
+npm run sidac -- emit-ir hello.sidali                 # print LLVM IR
+npm run sidac -- targets                              # list cross targets
+```
+
+Cross targets: `x86_64-linux`, `aarch64-linux`, `armv7m-none-eabi`, `cortex-m4`,
+`riscv32-none-elf`, `riscv64-none-elf`, `wasm32`, `bpfel`. Freestanding targets
+link against the bare-metal HAL in `src/hal/runtime.c` (no libc).
 
 Open the page: an editor on the left writes `.sidali` files, the **Run** button
 executes them on the VM, and the right pane shows real computed output plus the

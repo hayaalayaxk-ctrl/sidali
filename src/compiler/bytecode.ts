@@ -56,7 +56,7 @@ export function compile(program: A.Program): CompileResult {
         break;
       }
       case 'FnDecl': {
-        const fc = newChunk(node.name, node.params);
+        const fc = newChunk(node.name, node.params.map(p => p.name));
         compileBlockTo(fc, node.body);
         emit(fc, 'RET');
         emit(c, 'MAKE_FN', fc.id);
@@ -68,7 +68,7 @@ export function compile(program: A.Program): CompileResult {
         const statics: Array<{ name: string; value: A.Node }> = [];
         for (const m of node.members) {
           if (m.kind === 'FnDecl') {
-            const mc = newChunk(`${node.name}.${m.name}`, m.params, true);
+            const mc = newChunk(`${node.name}.${m.name}`, m.params.map(p => p.name), true);
             compileBlockTo(mc, m.body);
             emit(mc, 'RET');
             methods.push({ name: m.name, chunk: mc.id });
@@ -90,6 +90,95 @@ export function compile(program: A.Program): CompileResult {
         emit(c, 'CONST', `contract:${node.name}`);
         emit(c, 'DECLARE', node.name);
         compileBlockTo(c, node.body);
+        break;
+      }
+      case 'StructDecl': {
+        emit(c, 'MAKE_STRUCT', { name: node.name, fields: node.fields.map(f => f.name), reprC: node.reprC, packed: node.packed });
+        emit(c, 'DECLARE', node.name);
+        break;
+      }
+      case 'EnumDecl': {
+        emit(c, 'MAKE_ENUM', { name: node.name, variants: node.variants.map(v => ({ name: v.name, arity: v.fields.length })) });
+        emit(c, 'DECLARE', node.name);
+        break;
+      }
+      case 'TraitDecl': {
+        emit(c, 'CONST', `trait:${node.name}`);
+        emit(c, 'DECLARE', node.name);
+        break;
+      }
+      case 'ImplBlock': {
+        for (const m of node.methods) {
+          const mc = newChunk(`${node.typeName}.${m.name}`, m.params.map(p => p.name), true);
+          compileBlockTo(mc, m.body);
+          emit(mc, 'RET');
+          emit(c, 'ATTACH_METHOD', node.typeName, { name: m.name, chunk: mc.id });
+        }
+        break;
+      }
+      case 'MatchStmt': {
+        const endJumps: number[] = [];
+        const hasDefault = node.arms.some(a => a.pattern === '_');
+        const compileArm = (body: A.Block) => {
+          for (let i = 0; i < body.body.length; i++) {
+            const st = body.body[i];
+            if (i === body.body.length - 1 && st.kind === 'ExprStmt') {
+              compileExpr(c, (st as A.ExprStmt).expr); // leave value on stack as arm result
+            } else {
+              compileStmt(c, st);
+            }
+          }
+        };
+        for (const arm of node.arms) {
+          if (arm.pattern === '_') {
+            compileArm(arm.body);
+            continue;
+          }
+          compileExpr(c, node.value);
+          if (arm.pattern === 'literal') {
+            for (let i = 0; i < arm.literals.length; i++) {
+              if (i > 0) compileExpr(c, node.value);
+              compileExpr(c, arm.literals[i]);
+              emit(c, 'BINOP', '==');
+              if (i > 0) emit(c, 'BINOP', '||');
+            }
+          } else {
+            // variant / identifier pattern -> compare against tag name
+            emit(c, 'CONST', arm.pattern);
+            emit(c, 'BINOP', '==');
+          }
+          const jz = emit(c, 'JZ', -1);
+          compileArm(arm.body);
+          const j = emit(c, 'JUMP', -1);
+          endJumps.push(j);
+          c.code[jz].a = c.code.length;
+        }
+        if (!hasDefault) {
+          emit(c, 'CONST', null);
+          emit(c, 'DECLARE', '__match_unmatched');
+        }
+        for (const j of endJumps) c.code[j].a = c.code.length;
+        break;
+      }
+      case 'UnsafeBlock': {
+        emit(c, 'UNSAFE_ENTER');
+        compileBlockTo(c, node.body);
+        emit(c, 'UNSAFE_LEAVE');
+        break;
+      }
+      case 'ExternBlock': {
+        for (const fn of node.items) {
+          emit(c, 'DECLARE_EXTERN', { name: fn.name, params: fn.params.map(p => p.name), ret: fn.ret ? fn.ret.name : null });
+        }
+        break;
+      }
+      case 'UseStmt': {
+        emit(c, 'USE', node.path);
+        break;
+      }
+      case 'TypeAlias': {
+        emit(c, 'CONST', `type:${node.name}=${node.type.name}`);
+        emit(c, 'DECLARE', node.name);
         break;
       }
       case 'ReturnStmt': {
@@ -218,7 +307,16 @@ export function compile(program: A.Program): CompileResult {
       case 'StrLit': emit(c, 'CONST', node.value); break;
       case 'BoolLit': emit(c, 'CONST', node.value); break;
       case 'NilLit': emit(c, 'CONST', null); break;
-      case 'Ident': emit(c, 'LOAD', node.name); break;
+      case 'Ident': {
+        if (node.name.includes('::')) {
+          const [base, ...rest] = node.name.split('::');
+          emit(c, 'LOAD', base);
+          for (const part of rest) emit(c, 'MEMBER', part);
+        } else {
+          emit(c, 'LOAD', node.name);
+        }
+        break;
+      }
       case 'InterpStr': {
         emit(c, 'CONST', '');
         for (const p of node.parts) {
@@ -235,7 +333,8 @@ export function compile(program: A.Program): CompileResult {
       }
       case 'ObjectLit': {
         for (const e of node.entries) { emit(c, 'CONST', e.key); compileExpr(c, e.value); }
-        emit(c, 'OBJECT', node.entries.length);
+        if (node.typeName) emit(c, 'STRUCT_LIT', { name: node.typeName, n: node.entries.length });
+        else emit(c, 'OBJECT', node.entries.length);
         break;
       }
       case 'BinOp': {
@@ -326,6 +425,27 @@ export function compile(program: A.Program): CompileResult {
       case 'NewExpr': {
         for (const a of node.args) compileExpr(c, a);
         emit(c, 'NEW', node.className, node.args.length);
+        break;
+      }
+      case 'Cast': {
+        compileExpr(c, node.value);
+        emit(c, 'CAST', node.type.name);
+        break;
+      }
+      case 'RefExpr': {
+        compileExpr(c, node.value);
+        emit(c, 'REF', node.mut);
+        break;
+      }
+      case 'Deref': {
+        compileExpr(c, node.value);
+        emit(c, 'DEREF');
+        break;
+      }
+      case 'RangeExpr': {
+        if (node.start) compileExpr(c, node.start); else emit(c, 'CONST', 0);
+        if (node.end) compileExpr(c, node.end); else emit(c, 'CONST', -1);
+        emit(c, 'MAKE_RANGE', node.inclusive);
         break;
       }
       case 'Transcendental': {

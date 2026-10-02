@@ -156,6 +156,36 @@
   }
   $('run').addEventListener('click', run);
 
+  // ---------- LLVM IR (native backend) ----------
+  $('ir').addEventListener('click', () => {
+    output.textContent = '';
+    verify.textContent = '';
+    let ir;
+    try {
+      ir = E.emitLlvm(E.parse(editor.value), { target: 'x86_64-linux', optLevel: 2, entry: 'main' }).ir;
+    } catch (err) {
+      status.textContent = 'llvm error';
+      const d = document.createElement('div');
+      d.className = 'err';
+      d.textContent = '✖ ' + (err && err.message ? err.message : String(err));
+      output.appendChild(d);
+      return;
+    }
+    const head = document.createElement('div');
+    head.className = 'dim';
+    head.textContent = '// LLVM IR — feed to clang to produce native machine code (' + ir.split('\n').length + ' lines)';
+    output.appendChild(head);
+    const pre = document.createElement('div');
+    pre.className = 'ok';
+    pre.style.whiteSpace = 'pre';
+    pre.textContent = ir;
+    output.appendChild(pre);
+    verify.appendChild(chip('backend', 'llvm'));
+    verify.appendChild(chip('target', 'x86_64-linux'));
+    verify.appendChild(hashline('IR BLAKE3', E.blake3(ir)));
+    status.textContent = 'llvm ir emitted';
+  });
+
   // ---------- English -> SidAli ----------
   $('translate').addEventListener('click', () => {
     const english = prompt('Describe what you want in English (or use the microphone):', 'build a social platform');

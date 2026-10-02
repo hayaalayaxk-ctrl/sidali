@@ -1,14 +1,14 @@
 // SidAli Interpreter — stack VM with switch-case dispatch. No eval.
 // Values: number | string | boolean | null | array | object | function | class | instance.
 
-import * as C from '../lang/compiler';
-import * as A from '../lang/parser';
-import { blake3, blake3Bytes, utf8Encode, hex } from '../runtime/blake3';
-import * as M from '../runtime/math';
-import * as S from '../runtime/sedenion';
-import * as D from '../runtime/dilithium';
-import * as G from '../runtime/governance';
-import * as V from '../runtime/vm';
+import * as C from '../compiler/bytecode';
+import * as A from '../compiler/parser';
+import { blake3, blake3Bytes, utf8Encode, hex } from '../std/blake3';
+import * as M from '../std/math';
+import * as S from '../std/sedenion';
+import * as D from '../std/dilithium';
+import * as G from '../std/governance';
+import * as V from './machine';
 
 export class RuntimeError extends Error {
   line?: number;
@@ -109,7 +109,18 @@ export class SidAliClass {
 
 export class SidAliInstance {
   fields: Map<string, any> = new Map();
-  constructor(public cls: SidAliClass) {}
+  constructor(public cls: SidAliClass, public struct: SidAliStruct | null = null) {}
+}
+
+// Zero-cost data types: structs, enums and their methods live on the class object.
+export class SidAliStruct {
+  staticMethods: Map<string, SidAliFunction> = new Map();
+  constructor(public name: string, public fields: string[], public reprC = false, public packed = false) {}
+  lookupMethod(name: string): SidAliFunction | undefined { return this.staticMethods.get(name); }
+}
+export class SidAliEnumVariant {
+  constructor(public enumName: string, public variant: string, public arity: number) {}
+  toString() { return `${this.enumName}::${this.variant}`; }
 }
 
 export interface RunResult {
@@ -139,6 +150,8 @@ export class Interpreter {
   ledger = new G.Ledger();
   machine: V.Machine;
   natives: Map<string, { arity: number; fn: (interp: Interpreter, args: any[]) => any }> = new Map();
+  unsafeDepth = 0;
+  externs = new Map<string, (interp: Interpreter, args: any[]) => any>();
 
   constructor(public program: C.CompileResult) {
     this.main = program.main;
@@ -290,6 +303,25 @@ export class Interpreter {
     this.globals.vars.set('__fs', new Map<string, string>());
   }
 
+  castValue(v: any, typeName: string): any {
+    const t = typeName.replace(/\s/g, '');
+    if (/^[iu](8|16|32|64|size)$/.test(t)) {
+      const n = Math.trunc(Number(v) || 0);
+      if (t === 'u8') return n & 0xff;
+      if (t === 'u16') return n & 0xffff;
+      if (t === 'u32') return n >>> 0;
+      if (t === 'i8') return (n << 24) >> 24;
+      if (t === 'i16') return (n << 16) >> 16;
+      if (t === 'i32') return n | 0;
+      return n;
+    }
+    if (t === 'f32' || t === 'f64' || t === 'float') return Number(v);
+    if (t === 'bool') return truthy(v);
+    if (t === 'str' || t === 'string') return toStr(v);
+    if (t === 'usize' || t === 'isize') return Math.trunc(Number(v) || 0);
+    return v;
+  }
+
   callValue(fn: any, args: any[], thisVal?: any): any {
     if (fn instanceof SidAliFunction) return fn.call(this, args, thisVal);
     if (fn && typeof fn === 'object' && fn.__native) {
@@ -302,13 +334,30 @@ export class Interpreter {
       if (ctor) ctor.call(this, args, inst);
       return inst;
     }
+    if (fn instanceof SidAliStruct) {
+      const inst = new SidAliInstance(new SidAliClass(fn.name), fn);
+      for (let i = 0; i < fn.fields.length; i++) inst.fields.set(fn.fields[i], args[i]);
+      return inst;
+    }
+    if (fn && typeof fn === 'object' && fn.__extern) {
+      const impl = this.externs.get(fn.name);
+      if (impl) return impl(this, args);
+      return null;
+    }
+    if (fn && typeof fn === 'object' && fn.__enum) {
+      // Enum variant constructor: Color::Red or Option::Some(x)
+      return { __variant: true, enumName: fn.name, variant: args[0], value: args[1] };
+    }
     throw new RuntimeError(`value is not callable: ${toStr(fn)}`);
   }
 
   callChunk(chunk: C.Chunk, args: any[], thisVal: any, closure: Frame): any {
     const frame = makeFrame(closure, true);
     for (let i = 0; i < chunk.params.length; i++) frame.vars.set(chunk.params[i], args[i]);
-    if (thisVal !== undefined) frame.vars.set('this', thisVal);
+    if (thisVal !== undefined) {
+      frame.vars.set('this', thisVal);
+      frame.vars.set('self', thisVal);
+    }
     return this.executeChunk(chunk, frame, thisVal);
   }
 
@@ -375,6 +424,15 @@ export class Interpreter {
           for (let i = 0; i < n; i++) obj[pairs[i * 2]] = pairs[i * 2 + 1];
           stack.push(obj); ip++; break;
         }
+        case 'STRUCT_LIT': {
+          const { name, n } = ins.a;
+          const pairs = stack.splice(stack.length - n * 2, n * 2);
+          const ty = lookupFrame(frame, name) ? getVar(frame, name) : null;
+          const struct = ty instanceof SidAliStruct ? ty : new SidAliStruct(name, []);
+          const inst = new SidAliInstance(new SidAliClass(name), struct);
+          for (let i = 0; i < n; i++) inst.fields.set(pairs[i * 2], pairs[i * 2 + 1]);
+          stack.push(inst); ip++; break;
+        }
         case 'INDEX': { const idx = pop(), obj = pop(); stack.push(this.index(obj, idx)); ip++; break; }
         case 'SET_INDEX': {
           const val = pop(), idx = pop(), obj = pop();
@@ -388,6 +446,41 @@ export class Interpreter {
         case 'LEN': { const v = pop(); stack.push(this.lengthOf(v)); ip++; break; }
 
         case 'MAKE_FN': { const ch = this.chunks.get(ins.a)!; stack.push(new SidAliFunction(ch, frame, ch.name)); ip++; break; }
+        case 'MAKE_STRUCT': {
+          const spec = ins.a;
+          stack.push(new SidAliStruct(spec.name, spec.fields, spec.reprC, spec.packed)); ip++; break;
+        }
+        case 'MAKE_ENUM': {
+          const spec = ins.a;
+          const variants: Record<string, SidAliEnumVariant> = {};
+          for (const v of spec.variants) variants[v.name] = new SidAliEnumVariant(spec.name, v.name, v.arity);
+          stack.push({ __enum: true, name: spec.name, variants }); ip++; break;
+        }
+        case 'ATTACH_METHOD': {
+          const target = getVar(frame, ins.a);
+          const ch = this.chunks.get(ins.b.chunk)!;
+          const fn = new SidAliFunction(ch, frame, `${ins.a}.${ins.b.name}`);
+          if (target instanceof SidAliStruct) target.staticMethods.set(ins.b.name, fn);
+          else if (target instanceof SidAliClass) target.methods.set(ins.b.name, fn);
+          else if (target && typeof target === 'object' && target.__enum) target.methods = target.methods || new Map(), target.methods.set(ins.b.name, fn);
+          ip++; break;
+        }
+        case 'UNSAFE_ENTER': this.unsafeDepth++; ip++; break;
+        case 'UNSAFE_LEAVE': this.unsafeDepth = Math.max(0, this.unsafeDepth - 1); ip++; break;
+        case 'DECLARE_EXTERN': {
+          const spec = ins.a;
+          const native = (this.externs.get(spec.name)) || null;
+          frame.vars.set(spec.name, native || { __extern: true, name: spec.name, params: spec.params });
+          ip++; break;
+        }
+        case 'USE': ip++; break;
+        case 'CAST': { const v = pop(); stack.push(this.castValue(v, ins.a)); ip++; break; }
+        case 'REF': { const v = pop(); stack.push({ __ref: true, mut: !!ins.a, target: v, box: { value: v } }); ip++; break; }
+        case 'DEREF': {
+          const v = pop();
+          stack.push(v && v.__ref ? v.box.value : v); ip++; break;
+        }
+        case 'MAKE_RANGE': { const end = pop(), start = pop(); stack.push({ __range: true, start, end, inclusive: !!ins.a }); ip++; break; }
         case 'MAKE_CLASS': {
           const spec = ins.a;
           const cls = new SidAliClass(spec.name);
@@ -492,11 +585,22 @@ export class Interpreter {
     if (typeof v === 'string') return [...v].length;
     if (Array.isArray(v)) return v.length;
     if (v instanceof Map) return v.size;
+    if (v && typeof v === 'object' && v.__range) {
+      const { start, end, inclusive } = v;
+      const hi = inclusive ? end + 1 : end;
+      return end >= start ? Math.max(0, hi - start) : Math.max(0, start - hi);
+    }
     if (v && typeof v === 'object') return Object.keys(v).length;
     return 0;
   }
 
   private index(obj: any, idx: any): any {
+    if (obj && typeof obj === 'object' && obj.__range) {
+      const { start, end, inclusive } = obj;
+      const hi = inclusive ? end + 1 : end;
+      if (end >= start) return start + idx;
+      return start - idx;
+    }
     if (typeof obj === 'string') return [...obj][idx] ?? null;
     if (Array.isArray(obj)) return obj[idx < 0 ? obj.length + idx : idx] ?? null;
     if (obj instanceof Map) return obj.get(idx);
@@ -507,7 +611,7 @@ export class Interpreter {
   private member(obj: any, prop: string): any {
     if (obj instanceof SidAliInstance) {
       if (obj.fields.has(prop)) return obj.fields.get(prop);
-      const m = obj.cls.lookupMethod(prop);
+      const m = obj.cls.lookupMethod(prop) || (obj.struct ? obj.struct.lookupMethod(prop) : undefined);
       if (m) return m;
       const st = obj.cls.lookupStatic(prop);
       if (st !== undefined) return st;
@@ -518,6 +622,12 @@ export class Interpreter {
       if (st !== undefined) return st;
       return null;
     }
+    if (obj instanceof SidAliStruct) {
+      const m = obj.staticMethods.get(prop);
+      if (m) return m;
+      return null;
+    }
+    if (obj && typeof obj === 'object' && obj.__enum) return obj.variants[prop] ?? null;
     if (Array.isArray(obj) && (prop === 'length' || prop === 'len')) return obj.length;
     if (typeof obj === 'string' && (prop === 'length' || prop === 'len')) return [...obj].length;
     if (obj instanceof G.Ledger && prop === 'height') return obj.entries.length;
@@ -530,11 +640,11 @@ export class Interpreter {
 
   private callMethod(obj: any, name: string, args: any[]): any {
     if (obj instanceof SidAliInstance) {
-      const m = obj.cls.lookupMethod(name);
+      const m = obj.cls.lookupMethod(name) || (obj.struct ? obj.struct.lookupMethod(name) : undefined);
       if (m) return m.call(this, args, obj);
       const native = this.instanceNative(obj, name, args);
       if (native !== undefined) return native;
-      throw new RuntimeError(`${obj.cls.name} has no method '${name}'`);
+      throw new RuntimeError(`${obj.struct ? obj.struct.name : obj.cls.name} has no method '${name}'`);
     }
     if (Array.isArray(obj)) return this.arrayMethod(obj, name, args);
     if (typeof obj === 'string') return this.stringMethod(obj, name, args);
@@ -677,6 +787,9 @@ export class Interpreter {
   private looseEq(a: any, b: any): boolean {
     if (a === b) return true;
     if (a === null || b === null || a === undefined || b === undefined) return false;
+    if (a instanceof SidAliEnumVariant && typeof b === 'string') return a.variant === b;
+    if (b instanceof SidAliEnumVariant && typeof a === 'string') return b.variant === a;
+    if (a instanceof SidAliEnumVariant && b instanceof SidAliEnumVariant) return a.enumName === b.enumName && a.variant === b.variant;
     if (typeof a === 'number' && typeof b === 'string') return a === Number(b);
     if (typeof a === 'string' && typeof b === 'number') return Number(a) === b;
     if (Array.isArray(a) && Array.isArray(b)) return JSON.stringify(a) === JSON.stringify(b);

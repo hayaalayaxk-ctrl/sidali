@@ -10,7 +10,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 
 async function buildEngine(format, outfile, platform) {
   await build({
-    entryPoints: [resolve(root, 'src/engine/api.ts')],
+    entryPoints: [resolve(root, 'src/vm/api.ts')],
     bundle: true,
     format,
     platform,
@@ -44,9 +44,19 @@ async function main() {
   if (!existsSync(resolve(root, 'dist'))) mkdirSync(resolve(root, 'dist'));
   // node bundle for tests
   await buildEngine('esm', resolve(root, 'dist/engine.node.mjs'), 'node');
+  // node bundle exposing the native/LLVM pipeline for tests and the CLI
+  await build({
+    entryPoints: [resolve(root, 'src/compiler/native.ts')],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    outfile: resolve(root, 'dist/native.node.mjs'),
+    target: ['node18'],
+    logLevel: 'warning',
+  });
   // browser bundle (IIFE) inlined into index.html
   const res = await build({
-    entryPoints: [resolve(root, 'src/engine/api.ts')],
+    entryPoints: [resolve(root, 'src/vm/api.ts')],
     bundle: true,
     format: 'iife',
     globalName: 'SidAli',

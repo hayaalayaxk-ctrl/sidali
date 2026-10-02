@@ -2,7 +2,7 @@
 // 512-byte MBR bootloader simulation, ghost logic / semantic volume, and the
 // Immortal Kernel DNA export/import ([START]...[END]).
 
-import { blake3, blake3Bytes, utf8Encode, hex } from './blake3';
+import { blake3, blake3Bytes, utf8Encode, hex } from '../std/blake3';
 
 export const RAM_SIZE = 32 * 1024 * 1024; // 32MB
 export const PAGE_SIZE = 4096;

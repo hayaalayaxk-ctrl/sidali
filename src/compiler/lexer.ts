@@ -23,6 +23,14 @@ export const KEYWORDS: Record<string, string> = {
   'and': 'and', 'or': 'or', 'not': 'not', 'import': 'import',
   'build': 'build', 'contract': 'contract', 'system': 'system',
   'platform': 'platform', 'break': 'break', 'continue': 'continue',
+  // systems keywords (Rust-like)
+  'mut': 'mut', 'ref': 'ref', 'struct': 'struct', 'impl': 'impl', 'trait': 'trait',
+  'enum': 'enum', 'match': 'match', 'unsafe': 'unsafe', 'extern': 'extern',
+  'pub': 'pub', 'use': 'use', 'mod': 'mod', 'crate': 'crate', 'as': 'as',
+  'where': 'where', 'dyn': 'dyn', 'move': 'move', 'loop': 'loop', 'type': 'type',
+  'static': 'static', 'box': 'box', 'unsized': 'unsized', 'async': 'async',
+  'await': 'await', 'yield': 'yield', 'self': 'self', 'Self': 'Self', 'macro': 'macro',
+  'packed': 'packed', 'no_std': 'no_std', 'volatile': 'volatile', 'no_mangle': 'no_mangle',
   // Arabic source spellings -> canonical English keyword
   'متغير': 'let', 'ثابت': 'const', 'دالة': 'fn', 'ارجاع': 'return', 'إرجاع': 'return',
   'اذا': 'if', 'إذا': 'if', 'والا': 'else', 'وإلا': 'else', 'طالما': 'while',
@@ -34,8 +42,13 @@ export const KEYWORDS: Record<string, string> = {
   'عقد': 'contract', 'نظام': 'system', 'نظام_تشغيل': 'system', 'بناء': 'build',
   'منصة': 'platform', 'قاعدة': 'database', 'خادم': 'server', 'واجهة': 'interface',
   'زوج': 'pair', 'دع': 'let', 'عرف': 'let',
+  // Arabic systems keywords
+  'هيكل': 'struct', 'سمة': 'trait', 'تعداد': 'enum', 'طابق': 'match',
+  'غير_آمن': 'unsafe', 'خارجي': 'extern', 'عام': 'pub', 'استخدم': 'use',
+  'وحدة': 'mod', 'نوع': 'type', 'مرجع': 'ref',
 };
 
+const PUNCT3 = ['...', '..=', '<<=', '>>=', '===', '!=='];
 const PUNCT2 = ['==', '!=', '<=', '>=', '&&', '||', '->', '=>', '+=', '-=', '*=', '/=', '%=', '**', '..', '::'];
 
 export class LexError extends Error {
@@ -152,6 +165,12 @@ export function tokenize(src: string): Token[] {
     }
 
     const startL = line, startC = col;
+    const three = ch + (peek(1) || '') + (peek(2) || '');
+    if (PUNCT3.includes(three)) {
+      advance(); advance(); advance();
+      push('op', three, startL, startC);
+      continue;
+    }
     const two = ch + (peek(1) || '');
     if (PUNCT2.includes(two)) {
       advance(); advance();
