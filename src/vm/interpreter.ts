@@ -766,7 +766,13 @@ export class Interpreter {
       }
       case '-': return a - b;
       case '*': return a * b;
-      case '/': return b === 0 ? NaN : a / b;
+      case '/': {
+        // Integer operands divide as integers (like the native backend and
+        // Rust/C++); a float operand switches to true division.
+        if (b === 0) return Number.isInteger(a) && Number.isInteger(b) ? 0 : NaN;
+        if (Number.isInteger(a) && Number.isInteger(b)) return Math.trunc(a / b);
+        return a / b;
+      }
       case '%': return a % b;
       case '**': return Math.pow(a, b);
       case '==': return this.looseEq(a, b);

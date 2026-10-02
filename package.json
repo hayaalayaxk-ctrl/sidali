@@ -5,7 +5,8 @@
   "description": "SidAli — a real programming language (compiler + stack VM + playground). Formerly VOID-0.",
   "type": "module",
   "bin": {
-    "sidac": "bin/sidac.mjs"
+    "sidac": "bin/sidac.mjs",
+    "sidali": "bin/sidali.mjs"
   },
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 12000",
@@ -15,6 +16,7 @@
     "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "sidac": "node bin/sidac.mjs",
+    "sidali": "node bin/sidali.mjs",
     "dist": "node dist-build.mjs",
     "build:dist": "node build.mjs && node dist-build.mjs"
   },

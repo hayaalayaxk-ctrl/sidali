@@ -16,7 +16,7 @@ No `eval` is used anywhere. Everything below actually computes.
 npm install
 npm run build   # produces a single self-contained index.html (engine inlined)
 npm run dev     # serves it at http://localhost:12000
-npm test        # 47 tests: arithmetic, control flow, classes, crypto, algebra, native
+npm test        # 68 tests: arithmetic, control flow, classes, crypto, algebra, native, CLI
 ```
 
 ## Native compilation
@@ -142,10 +142,37 @@ physics. `x86_64`, `aarch64`, `armv7m`, `cortex-m4`, `riscv32`, `riscv64`, `wasm
 `bpfel` (object-only), plus `photon-riscv`, `qubit-riscv`, `fluidic-riscv`,
 `vacuum-riscv`, `holographic-wasm`, `plasma-arm`, `energy-riscv`.
 
+## Packages
+
+SidAli ships a small package manager. Packages are ordinary `.sidali` sources
+under `packages/<name>/` with a `sidali.toml` manifest.
+
+```sh
+node bin/sidali.mjs init myapp           # scaffold a project
+cd myapp
+node bin/sidali.mjs add std crypto       # record dependencies in sidali.toml
+node bin/sidali.mjs install              # vendor them, write sidali.lock (BLAKE3 hashes)
+node bin/sidali.mjs run                  # resolve `import` and execute
+node bin/sidali.mjs build --out=./app    # native compile the whole program
+```
+
+`import <name>` is resolved by the driver before compilation: each package's
+`src/main.sidali` is spliced ahead of the entry file, recursively, with cycle
+detection. The bundled packages are:
+
+| Package | Contents |
+| --- | --- |
+| `std` | `max`, `min`, `abs`, `clamp`, `gcd`, `lcm`, `pow`, `isqrt` |
+| `crypto` | `isPrime`, `modPow`, `fermat`, `countPrimes`, `checksum16` |
+| `collections` | `sort16`, `reverse16`, `sum16`, `min16`, `max16`, `contains16` |
+
+Packages are written to compile on both backends: scalar helpers stay untyped,
+array helpers declare a fixed size (`[i64; 16]`) so native code can lower them.
+
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hayaalayaxk-ctrl/sidali/master/dist/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hayaalayaxk-ctrl/sidali/main/dist/install.sh | sh
 ```
 
 Requires Node ≥ 18. The installer fetches `dist/sidac`, the engine bundles, and

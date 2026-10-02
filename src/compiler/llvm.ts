@@ -270,14 +270,14 @@ export class LlvmGen {
   private collectFns() {
     for (const node of this.program.body) {
       if (node.kind === 'FnDecl') {
-        this.fns.set(`@${node.name}`, { params: node.params.map(p => this.resolveType(p.type)), ret: this.resolveType(node.ret), variadic: false, extern: false });
+        this.fns.set(`@${node.name}`, { params: node.params.map(p => this.resolveType(p.type)), ret: this.inferFnRet(node), variadic: false, extern: false });
       } else if (node.kind === 'ExternBlock') {
         for (const fn of node.items) {
           this.fns.set(`@${fn.name}`, { params: fn.params.map(p => this.resolveType(p.type)), ret: this.resolveType(fn.ret), variadic: false, extern: true });
         }
       } else if (node.kind === 'ImplBlock') {
         for (const m of node.methods) {
-          this.fns.set(`@${node.typeName}.${m.name}`, { params: m.params.map(p => this.resolveType(p.type)), ret: this.resolveType(m.ret), variadic: false, extern: false });
+          this.fns.set(`@${node.typeName}.${m.name}`, { params: m.params.map(p => this.resolveType(p.type)), ret: this.inferFnRet(m), variadic: false, extern: false });
         }
       }
     }
@@ -288,9 +288,39 @@ export class LlvmGen {
     }
   }
 
+  // When no return type is declared, infer it from the first `return <expr>`.
+  // Without this, a boolean-returning helper defaults to i64 and the emitted
+  // `ret i64` clashes with the i1 the body produces. Functions with no
+  // `return` keep the historical i64 default (main's exit code depends on it).
+  private inferFnRet(fn: A.FnDecl): SType {
+    if (fn.ret) return this.resolveType(fn.ret);
+    const found = this.findReturn(fn.body);
+    return found ? this.inferType(found) : I64;
+  }
+
+  private findReturn(node: A.Node | null): A.Node | null {
+    if (!node) return null;
+    switch (node.kind) {
+      case 'ReturnStmt': return (node as A.ReturnStmt).value;
+      case 'Block': for (const st of (node as A.Block).body) { const r = this.findReturn(st); if (r) return r; } return null;
+      case 'IfStmt': {
+        const i = node as A.IfStmt;
+        return this.findReturn(i.then) || (i.else ? this.findReturn(i.else as A.Node) : null);
+      }
+      case 'WhileStmt': return this.findReturn((node as any).body);
+      case 'ForStmt': return this.findReturn((node as any).body);
+      case 'RepeatStmt': return this.findReturn((node as any).body);
+      case 'TryStmt': {
+        const t = node as any;
+        return this.findReturn(t.body) || (t.catch ? this.findReturn(t.catch.body) : null) || (t.finalizer ? this.findReturn(t.finalizer) : null);
+      }
+      default: return null;
+    }
+  }
+
   private genFunction(fn: A.FnDecl, mangled?: string): string {
     const name = mangled || fn.name;
-    const ret = this.resolveType(fn.ret);
+    const ret = this.inferFnRet(fn);
     const params = fn.params;
     const paramTys = params.map(p => this.resolveType(p.type));
     const selfType = mangled ? this.structs.get(mangled.split('.')[0]) : undefined;
@@ -328,7 +358,7 @@ export class LlvmGen {
     if (ret.llvm === 'void') this.emit('ret void');
     else if (ret.kind === 'float') this.emit(`ret ${ret.llvm} 0.0`);
     else if (ret.llvm === 'ptr') this.emit('ret ptr null');
-    else if (ret.kind === 'struct') this.emit(`ret ${ret.llvm} zeroinitializer`);
+    else if (ret.kind === 'struct' || ret.kind === 'array') this.emit(`ret ${ret.llvm} zeroinitializer`);
     else this.emit(`ret ${ret.llvm} 0`);
 
     const body = this.lines;
@@ -353,8 +383,21 @@ export class LlvmGen {
         const slot = `%${decl.name}.addr.${this.regCounter}`;
         this.emit(`${slot} = alloca ${ty.llvm}`);
         if (decl.init) {
-          const v = this.coerce(this.genExpr(decl.init, ty), ty);
-          this.emit(`store ${ty.llvm} ${v.val}, ptr ${slot}`);
+          // Arrays are value types. A literal lowers to a pointer to its own
+          // storage, so a plain `store` would store the pointer. Copy the
+          // elements into the declared slot instead.
+          const lit = decl.init.kind === 'ArrayLit' ? decl.init as A.ArrayLit : null;
+          if (ty.kind === 'array' && ty.elem && lit && lit.items.length === ty.len) {
+            for (let i = 0; i < lit.items.length; i++) {
+              const ev = this.coerce(this.genExpr(lit.items[i], ty.elem), ty.elem);
+              const ep = this.reg();
+              this.emit(`${ep} = getelementptr inbounds ${ty.llvm}, ptr ${slot}, i64 0, i64 ${i}`);
+              this.emit(`store ${ty.elem.llvm} ${ev.val}, ptr ${ep}`);
+            }
+          } else {
+            const v = this.coerce(this.genExpr(decl.init, ty), ty);
+            this.emit(`store ${ty.llvm} ${v.val}, ptr ${slot}`);
+          }
         } else {
           this.emit(`store ${ty.llvm} ${this.zero(ty)}, ptr ${slot}`);
         }
@@ -436,6 +479,7 @@ export class LlvmGen {
       case 'Block': { this.genBlock(node); break; }
       case 'ContractDecl': { this.genBlock(node.body); break; }
       case 'TryStmt': { this.genBlock(node.body); if (node.finalizer) this.genBlock(node.finalizer); break; }
+      case 'ImportStmt': { break; } // resolved by the driver before lowering
       default: { this.genExpr(node); }
     }
   }
@@ -832,6 +876,28 @@ export class LlvmGen {
     let ty = l.ty;
     const r0 = this.genExpr(node.right, l.ty.kind === 'float' ? l.ty : undefined);
     let lv = l, rv = r0;
+    // Array concatenation: materialize a new fixed array of both lengths.
+    if (op === '+' && l.ty.kind === 'array' && r0.ty.kind === 'array' && l.ty.elem && r0.ty.elem) {
+      const elem = l.ty.elem;
+      const n = (l.ty.len || 0) + (r0.ty.len || 0);
+      const arrTy: SType = { name: `[${n} x ${elem.name}]`, llvm: `[${n} x ${elem.llvm}]`, kind: 'array', elem, len: n };
+      const slot = `%cat.${this.regCounter}`;
+      this.emit(`${slot} = alloca ${arrTy.llvm}`);
+      let i = 0;
+      for (let k = 0; k < (l.ty.len || 0); k++, i++) {
+        const dp = this.reg(); this.emit(`${dp} = getelementptr inbounds ${arrTy.llvm}, ptr ${slot}, i64 0, i64 ${i}`);
+        const sp = this.reg(); this.emit(`${sp} = getelementptr inbounds ${l.ty.llvm}, ptr ${l.val}, i64 0, i64 ${k}`);
+        const ev = this.reg(); this.emit(`${ev} = load ${elem.llvm}, ptr ${sp}`);
+        this.emit(`store ${elem.llvm} ${ev}, ptr ${dp}`);
+      }
+      for (let k = 0; k < (r0.ty.len || 0); k++, i++) {
+        const dp = this.reg(); this.emit(`${dp} = getelementptr inbounds ${arrTy.llvm}, ptr ${slot}, i64 0, i64 ${i}`);
+        const sp = this.reg(); this.emit(`${sp} = getelementptr inbounds ${r0.ty.llvm}, ptr ${r0.val}, i64 0, i64 ${k}`);
+        const ev = this.reg(); this.emit(`${ev} = load ${elem.llvm}, ptr ${sp}`);
+        this.emit(`store ${elem.llvm} ${ev}, ptr ${dp}`);
+      }
+      return { ty: arrTy, val: slot };
+    }
     if (l.ty.kind === 'float' || r0.ty.kind === 'float') {
       const fty: SType = l.ty.kind === 'float' ? l.ty : (r0.ty.kind === 'float' ? r0.ty : F64);
       lv = this.coerce(l, fty); rv = this.coerce(r0, fty); ty = fty;
@@ -915,6 +981,11 @@ export class LlvmGen {
       const cur = this.reg(); this.emit(`${cur} = load ${lv.ty.llvm}, ptr ${lv.ptr}`);
       const rhs = this.coerce(this.genExpr(node.value, lv.ty), lv.ty);
       v = this.genBinOpValues(binOp, { ty: lv.ty, val: cur }, rhs);
+    }
+    // Fixed arrays are value types whose length is part of the type; a
+    // mismatched store would emit IR clang rejects, so fail loudly instead.
+    if (lv.ty.kind === 'array' && v.ty.kind === 'array' && lv.ty.llvm !== v.ty.llvm) {
+      throw new LlvmError(`array size mismatch: cannot store ${v.ty.name} into ${lv.ty.name}`);
     }
     this.emit(`store ${lv.ty.llvm} ${v.val}, ptr ${lv.ptr}`);
     return v;

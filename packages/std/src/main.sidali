@@ -1,0 +1,47 @@
+// sidali-std — core numeric helpers, written in SidAli itself.
+//
+// Every function here is scalar so the same source compiles to the VM and to
+// native machine code (see packages/collections for fixed-size array work).
+
+fn max(a, b) { if a > b { return a } return b }
+fn min(a, b) { if a < b { return a } return b }
+fn abs(a) { if a < 0 { return 0 - a } return a }
+fn clamp(x, lo, hi) { return min(max(x, lo), hi) }
+
+fn gcd(a, b) {
+  let x = abs(a)
+  let y = abs(b)
+  while y != 0 {
+    let t = y
+    y = x % y
+    x = t
+  }
+  return x
+}
+
+fn lcm(a, b) { return (a * b) / gcd(a, b) }
+
+fn pow(base, exp) {
+  let r = 1
+  let i = 0
+  while i < exp {
+    r = r * base
+    i = i + 1
+  }
+  return r
+}
+
+// Iterative integer square root; no floating point, exact for i64 inputs.
+fn isqrt(n) {
+  if n < 2 { return n }
+  let x = n
+  let y = (x + 1) / 2
+  while y < x {
+    x = y
+    y = (x + n / x) / 2
+  }
+  return x
+}
+
+fn isEven(n) { return n % 2 == 0 }
+fn isOdd(n) { return n % 2 != 0 }

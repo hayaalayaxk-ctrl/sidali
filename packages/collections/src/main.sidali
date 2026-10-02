@@ -1,0 +1,70 @@
+// sidali-collections — fixed-capacity array algorithms in SidAli.
+//
+// Sizes are declared explicitly (`[i64; N]`) so the same code lowers to native
+// machine code, where arrays are value types with a compile-time length.
+
+fn reverse16(arr: [i64; 16], n: i64) -> [i64; 16] {
+  let out: [i64; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  let i = 0
+  while i < n {
+    out[i] = arr[n - 1 - i]
+    i = i + 1
+  }
+  return out
+}
+
+// Insertion sort, stable, over the first n slots.
+fn sort16(arr: [i64; 16], n: i64) -> [i64; 16] {
+  let a: [i64; 16] = arr
+  let i = 1
+  while i < n {
+    let key = a[i]
+    let j = i - 1
+    while j >= 0 && a[j] > key {
+      a[j + 1] = a[j]
+      j = j - 1
+    }
+    a[j + 1] = key
+    i = i + 1
+  }
+  return a
+}
+
+fn sum16(arr: [i64; 16], n: i64) -> i64 {
+  let s = 0
+  let i = 0
+  while i < n {
+    s = s + arr[i]
+    i = i + 1
+  }
+  return s
+}
+
+fn max16(arr: [i64; 16], n: i64) -> i64 {
+  let m = arr[0]
+  let i = 1
+  while i < n {
+    if arr[i] > m { m = arr[i] }
+    i = i + 1
+  }
+  return m
+}
+
+fn min16(arr: [i64; 16], n: i64) -> i64 {
+  let m = arr[0]
+  let i = 1
+  while i < n {
+    if arr[i] < m { m = arr[i] }
+    i = i + 1
+  }
+  return m
+}
+
+fn contains16(arr: [i64; 16], n: i64, x: i64) -> i64 {
+  let i = 0
+  while i < n {
+    if arr[i] == x { return 1 }
+    i = i + 1
+  }
+  return 0
+}
