@@ -5,7 +5,7 @@
 set -eu
 
 REPO="hayaalayaxk-ctrl/sidali"
-BRANCH="master"
+BRANCH="${SIDALI_BRANCH:-main}"
 BASE="${SIDALI_BASE:-https://raw.githubusercontent.com/${REPO}/${BRANCH}}"
 PREFIX="${SIDALI_PREFIX:-$HOME/.sidali}"
 BIN="$PREFIX/bin"

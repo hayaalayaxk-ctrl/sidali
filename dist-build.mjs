@@ -107,7 +107,7 @@ function buildInstallSh() {
 set -eu
 
 REPO="hayaalayaxk-ctrl/sidali"
-BRANCH="${SIDALI_BRANCH:-main}"
+BRANCH="\${SIDALI_BRANCH:-main}"
 BASE="\${SIDALI_BASE:-https://raw.githubusercontent.com/\${REPO}/\${BRANCH}}"
 PREFIX="\${SIDALI_PREFIX:-\$HOME/.sidali}"
 BIN="\$PREFIX/bin"
